@@ -1,0 +1,52 @@
+# Publishes site/ to GitHub Pages. Pages has to be turned on once:
+# Settings -> Pages -> Build and deployment -> Source: GitHub Actions.
+name: Publish the site
+
+on:
+  push:
+    paths:
+      - site/**
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.pages.outputs.enabled }}
+    steps:
+      - id: pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh api "repos/$GITHUB_REPOSITORY/pages" >/dev/null 2>&1; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::GitHub Pages is off for this repository. Turn it on in Settings -> Pages (Source: GitHub Actions), then run this workflow again."
+          fi
+
+  deploy:
+    needs: check
+    if: needs.check.outputs.enabled == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4

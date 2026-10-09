@@ -1,0 +1,69 @@
+# Builds Cordial 0.27.0's loader (cordial-run) with patches/cordial-devctl-multitouch.patch,
+# which lets RobloxCloud's mobile mode put several fingers on the game at once, and
+# publishes it as the release vm/setup.py downloads. Cordial is GPL-3.0-or-later; the
+# release carries the patch, and the rest of the source is upstream's v0.27.0 tag.
+name: Build multi-touch Cordial
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - patches/cordial-devctl-multitouch.patch
+      - .github/workflows/build-cordial.yml
+
+permissions:
+  contents: write
+
+env:
+  TAG: cordial-0.27.0-multitouch
+
+jobs:
+  build:
+    # Ubuntu 24.04's glibc 2.39 is Cordial's own floor, and what Colab runs.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch Cordial v0.27.0
+        run: |
+          git clone --depth 1 --branch v0.27.0 --recurse-submodules --shallow-submodules \
+            https://github.com/luohoa97/cordial.git cordial
+          git -C cordial apply "$GITHUB_WORKSPACE/patches/cordial-devctl-multitouch.patch"
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang cmake pkg-config libboost-dev \
+            libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev libpipewire-0.3-dev libpulse-dev \
+            libasound2-dev zlib1g-dev
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cordial-cargo-${{ hashFiles('cordial/Cargo.lock') }}
+      - name: Build cordial-run
+        working-directory: cordial
+        env:
+          CC: clang
+          CXX: clang++
+          CORDIAL_GIT_SHA: 0814e2d
+        # The same features the upstream .deb enables (packaging/deb/build-deb.sh);
+        # the WebView is what shows Roblox's captcha.
+        run: |
+          cargo build --release --locked -p cordial-runtime --bin cordial-run \
+            --features cordial-runtime/webview,cordial-runtime/vr
+          readelf -d target/release/cordial-run | grep -qi webkit
+          packaging/check-glibc-floor.sh target/release/cordial-run
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          install -m755 cordial/target/release/cordial-run cordial-run
+          strip --strip-debug cordial-run
+          sha256sum cordial-run > cordial-run.sha256
+          cat cordial-run.sha256
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --target "$GITHUB_SHA" --title "Cordial 0.27.0 loader with multi-touch" --notes \
+              "cordial-run from [Cordial v0.27.0](https://github.com/luohoa97/cordial/tree/v0.27.0) (GPL-3.0-or-later) with \`cordial-devctl-multitouch.patch\` applied: its devctl socket gains \`touch <down|move|up> <id> <x> <y>\`, so RobloxCloud's mobile mode can put several fingers on Roblox's touch controls at once. Built by .github/workflows/build-cordial.yml; the patch is attached and in patches/."
+          fi
+          gh release upload "$TAG" cordial-run cordial-run.sha256 patches/cordial-devctl-multitouch.patch --clobber

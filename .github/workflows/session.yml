@@ -1,0 +1,99 @@
+# The page (site/) starts this with the GitHub API; see scripts/session.py for
+# what each action does and how progress gets back to the page.
+name: Roblox session
+run-name: "RobloxCloud ${{ inputs.action }} ${{ inputs.session_id }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "login (finish Google sign-in) or play (run Roblox on a Colab GPU)"
+        type: choice
+        options: [play, login]
+        default: play
+      session_id:
+        description: "Random id the page picked; names the status and the Colab session"
+        required: true
+      key_hash:
+        description: "play: SHA-256 of the key the stream asks for"
+        default: ""
+      gpu:
+        description: "play: GPU to ask for first (L4 falls back to T4)"
+        type: choice
+        options: [L4, T4]
+        default: L4
+      mode:
+        description: "play: pc (keyboard and mouse) or mobile (Roblox's touch controls)"
+        type: choice
+        options: [pc, mobile]
+        default: pc
+      size:
+        description: "play: stream size, WIDTHxHEIGHT"
+        default: "1280x720"
+      max_minutes:
+        description: "play: release the VM after this many minutes"
+        default: "120"
+      repo_public_key:
+        description: "login: this repo's Actions public key, as key_id:base64"
+        default: ""
+      page_public_key:
+        description: "login: the page's one-time public key (base64)"
+        default: ""
+
+permissions:
+  contents: read
+  statuses: write
+  checks: write
+
+jobs:
+  session:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      SESSION_ID: ${{ inputs.session_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: scripts/requirements.txt
+      - name: Install the colab CLI
+        run: pip install -r scripts/requirements.txt
+
+      - name: Finish the Google sign-in
+        if: inputs.action == 'login'
+        env:
+          COLAB_AUTH_CODE: ${{ secrets.COLAB_AUTH_CODE }}
+          REPO_PUBLIC_KEY_INPUT: ${{ inputs.repo_public_key }}
+          PAGE_PUBLIC_KEY: ${{ inputs.page_public_key }}
+          GITHUB_TOKEN: ${{ github.token }}
+          # Google may list granted scopes in another order than requested.
+          OAUTHLIB_RELAX_TOKEN_SCOPE: "1"
+        run: |
+          export REPO_PUBLIC_KEY_ID="${REPO_PUBLIC_KEY_INPUT%%:*}" REPO_PUBLIC_KEY="${REPO_PUBLIC_KEY_INPUT#*:}"
+          python scripts/session.py login
+
+      - name: Run Roblox on a Colab GPU
+        if: inputs.action == 'play'
+        env:
+          COLAB_TOKEN: ${{ secrets.COLAB_TOKEN }}
+          KEY_HASH: ${{ inputs.key_hash }}
+          GPU: ${{ inputs.gpu }}
+          MODE: ${{ inputs.mode }}
+          SIZE: ${{ inputs.size }}
+          MAX_MINUTES: ${{ inputs.max_minutes }}
+          GITHUB_TOKEN: ${{ github.token }}
+          # The multi-touch build of Cordial's loader, from build-cordial.yml.
+          # Without it phones still work, with one finger at a time.
+          CORDIAL_RUN_URL: https://github.com/${{ github.repository }}/releases/download/cordial-0.27.0-multitouch/cordial-run
+        run: |
+          export WIDTH="${SIZE%%x*}" HEIGHT="${SIZE#*x}"
+          python scripts/session.py play
+
+      - name: Release the Colab VM
+        if: always() && inputs.action == 'play'
+        env:
+          COLAB_TOKEN: ${{ secrets.COLAB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/session.py cleanup

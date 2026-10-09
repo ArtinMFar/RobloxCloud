@@ -1,0 +1,12 @@
+{
+  "name": "RobloxCloud",
+  "short_name": "RobloxCloud",
+  "description": "Run Roblox on a Google Colab GPU and play it in the browser.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "fullscreen",
+  "orientation": "any",
+  "background_color": "#0b0d12",
+  "theme_color": "#0b0d12",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}

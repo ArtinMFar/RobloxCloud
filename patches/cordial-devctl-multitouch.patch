@@ -1,0 +1,85 @@
+diff --git a/crates/cordial-runtime/src/devctl.rs b/crates/cordial-runtime/src/devctl.rs
+index 9e352db..76d1fec 100644
+--- a/crates/cordial-runtime/src/devctl.rs
++++ b/crates/cordial-runtime/src/devctl.rs
+@@ -84,8 +84,30 @@ pub enum Cmd {
+     /// parameters to the engine again, on the pump thread. See
+     /// `android::surface_params` for the experiment this is for.
+     UpdateSurface { app: bool, game: bool },
++    /// `touch <down|move|up> <id> <x> <y>`: one finger of several, by id.
++    ///
++    /// The scripted `down`/`move`/`up` above share one contact, so they can
++    /// only ever be one finger. A remote touchscreen (a phone streaming this
++    /// client) holds a thumbstick and a camera drag at once, so each of its
++    /// fingers gets its own contact in the same tracker `wl_touch` drives.
++    Touch { phase: TouchPhase, id: i64, x: f32, y: f32 },
++    /// `touch cancel`: every remote finger is gone, and the gesture meant
++    /// nothing (the stream's page lost focus mid-gesture).
++    TouchCancel,
++}
++
++#[derive(Debug, Clone, Copy)]
++pub enum TouchPhase {
++    Down,
++    Move,
++    Up,
+ }
+ 
++/// Where remote finger ids start in the tracker's platform-id space: above
++/// anything a `wl_touch` (an `int32_t`) can hand out, and clear of the
++/// scripted contact's `i64::MIN`.
++const REMOTE_CONTACT_BASE: i64 = 1 << 40;
++
+ static QUEUE: Mutex<Vec<Cmd>> = Mutex::new(Vec::new());
+ 
+ /// Commands accepted since start, so `info` can show the surface is live even
+@@ -472,6 +494,29 @@ fn handle(line: &str) -> String {
+             },
+             None => "err screenshot <path>".into(),
+         },
++        "touch" => {
++            let phase = match it.next() {
++                Some("down") => TouchPhase::Down,
++                Some("move") => TouchPhase::Move,
++                Some("up") => TouchPhase::Up,
++                Some("cancel") => {
++                    push(Cmd::TouchCancel);
++                    return "ok".into();
++                }
++                _ => return "err touch <down|move|up> <id> <x> <y> | touch cancel".into(),
++            };
++            match (it.next().and_then(|v| v.parse::<i64>().ok()), num(it.next()), num(it.next())) {
++                (Some(id), Some(x), Some(y)) if (0..1 << 20).contains(&id) => {
++                    push(Cmd::Touch { phase, id, x, y });
++                    "ok".into()
++                }
++                (Some(id), _, _) if matches!(phase, TouchPhase::Up) && (0..1 << 20).contains(&id) => {
++                    push(Cmd::Touch { phase, id, x: 0.0, y: 0.0 });
++                    "ok".into()
++                }
++                _ => "err touch <down|move|up> <id 0..2^20> <x> <y>".into(),
++            }
++        }
+         _ => format!("err unknown verb {verb:?}"),
+     }
+ }
+@@ -694,6 +739,19 @@ pub fn apply_queued(handle: i64) {
+                     println!("  devctl: updatesurface {line}");
+                 }
+             }
++            Cmd::Touch { phase, id, x, y } => {
++                use crate::android::input::{touch_down, touch_motion, touch_up};
++                let surface = crate::android::canvas_size();
++                let id = REMOTE_CONTACT_BASE + id;
++                match phase {
++                    TouchPhase::Down => touch_down(handle, id, x, y, surface, now_ms()),
++                    TouchPhase::Move => touch_motion(handle, id, x, y, surface, now_ms()),
++                    TouchPhase::Up => touch_up(handle, id, surface, now_ms()),
++                }
++            }
++            Cmd::TouchCancel => {
++                crate::android::input::touch_cancel(handle, crate::android::canvas_size(), now_ms())
++            }
+         }
+     }
+ }

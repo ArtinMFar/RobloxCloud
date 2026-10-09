@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0d12">
+  <meta name="description" content="Run Roblox on a Google Colab GPU and play it in your browser, on a PC or a phone.">
+  <title>RobloxCloud</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="./" aria-label="RobloxCloud home">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M9 24h15a6 6 0 0 0 .9-11.93A8.5 8.5 0 0 0 8.4 13.5 5.25 5.25 0 0 0 9 24Z" fill="var(--brand)"/><path d="M14 13.6v7.8l6.2-3.9z" fill="var(--bg)"/></svg>
+      <span>RobloxCloud</span>
+    </a>
+    <div class="topbar-right">
+      <span id="accountChip" class="chip" hidden></span>
+      <button id="settingsBtn" class="icon-btn" type="button" aria-label="Settings" title="Settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 9 19.4a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1.03-1.56V3a2 2 0 1 1 4 0v.09A1.7 1.7 0 0 0 15 4.6a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.14.6.68 1.03 1.3 1.03H21a2 2 0 1 1 0 4h-.09c-.62 0-1.16.42-1.3 1Z"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main id="home" class="home">
+    <section class="hero">
+      <h1>Roblox, on a cloud GPU</h1>
+      <p>RobloxCloud rents a GPU from Google Colab, runs Roblox on it with
+        <a href="https://github.com/luohoa97/cordial" target="_blank" rel="noopener">Cordial</a>
+        and streams it to this page. Play with a keyboard and mouse or with touch controls.</p>
+    </section>
+
+    <div id="banner" class="banner" hidden></div>
+
+    <ol class="steps">
+      <li id="stepGithub" class="step">
+        <div class="step-head">
+          <span class="num">0</span>
+          <div class="step-title"><h2>Connect GitHub</h2><span class="step-sub" id="githubSub">One time. GitHub Actions starts and stops the Colab VM.</span></div>
+        </div>
+        <form id="githubForm" class="step-body" autocomplete="off">
+          <p>Make a <a id="patLink" href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">fine-grained token</a>
+            for <strong id="repoName">this repository</strong> with these repository permissions:
+            <b>Actions</b> read and write, <b>Secrets</b> read and write, <b>Commit statuses</b> read.
+            (A <a id="classicLink" href="https://github.com/settings/tokens/new?scopes=repo&amp;description=RobloxCloud" target="_blank" rel="noopener">classic token</a> with the <code>repo</code> scope also works.)
+            It stays in this browser.</p>
+          <label class="field"><span>GitHub token</span>
+            <input id="githubToken" type="password" placeholder="github_pat_…" spellcheck="false" autocapitalize="off" required>
+          </label>
+          <div class="row"><button class="btn primary" type="submit">Connect</button><span class="msg" id="githubMsg" role="status"></span></div>
+        </form>
+      </li>
+
+      <li id="stepGoogle" class="step">
+        <div class="step-head">
+          <span class="num">1</span>
+          <div class="step-title"><h2>Sign in with Google</h2><span class="step-sub" id="googleSub">The Colab CLI's sign-in. Colab bills GPU time to this account.</span></div>
+        </div>
+        <div class="step-body">
+          <p>This opens the same Google page as the <code>colab</code> command-line tool. Approve it, then copy the
+            authorization code Google shows and paste it here.</p>
+          <button id="googleBtn" class="btn google" type="button">
+            <svg viewBox="0 0 48 48" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="m6.3 14.7 6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z"/></svg>
+            Sign in with Google
+          </button>
+          <form id="codeForm" class="code-form" hidden autocomplete="off">
+            <label class="field"><span>Authorization code</span>
+              <input id="codeInput" type="text" placeholder="4/0A…" spellcheck="false" autocapitalize="off" autocorrect="off" required>
+            </label>
+            <div class="row"><button class="btn primary" type="submit" id="codeBtn">Continue</button>
+              <button class="btn ghost" type="button" id="googleAgain">Open the Google page again</button></div>
+          </form>
+          <p class="msg" id="googleMsg" role="status"></p>
+        </div>
+      </li>
+
+      <li id="stepGpu" class="step">
+        <div class="step-head">
+          <span class="num">2</span>
+          <div class="step-title"><h2>Pick a GPU</h2><span class="step-sub" id="gpuSub">Roblox renders on it with NVIDIA's Vulkan driver.</span></div>
+        </div>
+        <div class="step-body">
+          <div class="gpus" role="radiogroup" aria-label="GPU">
+            <button type="button" class="gpu" data-gpu="L4" role="radio" aria-checked="false">
+              <span class="gpu-name">NVIDIA L4</span>
+              <span class="gpu-desc">Faster, more CPU cores. Needs Colab Pro or pay-as-you-go compute units.</span>
+            </button>
+            <button type="button" class="gpu" data-gpu="T4" role="radio" aria-checked="false">
+              <span class="gpu-name">NVIDIA T4</span>
+              <span class="gpu-desc">Available on Colab's free tier.</span>
+            </button>
+          </div>
+          <p class="msg" id="gpuMsg" role="status"></p>
+        </div>
+      </li>
+
+      <li id="stepPlay" class="step step-play">
+        <button id="playBtn" class="btn play" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z"/></svg>
+          Play
+        </button>
+        <p class="play-meta"><span id="playMeta"></span> · <button type="button" class="link" id="modeLink">change controls</button></p>
+      </li>
+    </ol>
+
+    <p class="fineprint">Roblox may ban accounts that use third-party clients such as Cordial, so play on an account you can afford to lose.
+      Colab's free tier does not allow remote desktops; a paid plan avoids that rule.
+      <a href="https://github.com/ArtinMFar/RobloxCloud" id="sourceLink" target="_blank" rel="noopener">Source</a></p>
+  </main>
+
+  <section id="launch" class="launch" hidden>
+    <div class="launch-card">
+      <div class="launch-head">
+        <h2>Starting Roblox</h2>
+        <span class="timer" id="launchTimer">0:00</span>
+      </div>
+      <div id="launchBanner" class="banner" hidden></div>
+      <ol class="progress" id="progress"></ol>
+      <p class="launch-msg" id="launchMsg">Starting a GitHub Action…</p>
+      <div class="row">
+        <button class="btn stop" type="button" id="launchStop">Stop</button>
+        <a class="btn ghost" id="runLink" target="_blank" rel="noopener" hidden>Workflow log</a>
+      </div>
+      <p class="fineprint">The first start takes a few minutes: Colab gives out a VM, then Cordial and Roblox (about 400 MB) are installed on it.</p>
+    </div>
+  </section>
+
+  <section id="stage" class="stage" hidden>
+    <canvas id="video" class="video" tabindex="0" aria-label="Roblox"></canvas>
+    <div id="stageOverlay" class="stage-overlay">
+      <div class="overlay-card">
+        <div class="spinner" id="overlaySpinner"></div>
+        <p id="overlayText">Connecting to the stream…</p>
+        <button class="btn play" type="button" id="tapToPlay" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z"/></svg>
+          <span id="tapToPlayText">Play</span>
+        </button>
+      </div>
+    </div>
+    <div class="rotate-hint" aria-hidden="true">Turn your phone sideways for a bigger picture</div>
+    <div id="lockHint" class="lock-hint" hidden>Click to control the camera · Esc to let go</div>
+    <div id="hud" class="hud">
+      <button class="hud-btn stop" type="button" id="stopBtn" title="Stop the session">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg><span>Stop</span>
+      </button>
+      <button class="hud-btn" type="button" id="kbBtn" title="Keyboard" aria-label="Keyboard">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2.5" y="6" width="19" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M6 9.5h1.5M9.5 9.5H11M13 9.5h1.5M16.5 9.5H18M6 12.5h1.5M9.5 12.5H11M13 12.5h1.5M16.5 12.5H18M8 15.3h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      </button>
+      <button class="hud-btn" type="button" id="fsBtn" title="Fullscreen" aria-label="Fullscreen">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+      <button class="hud-btn" type="button" id="moreBtn" title="More" aria-label="More" aria-expanded="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5.5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="18.5" cy="12" r="1.8"/></svg>
+      </button>
+      <span class="hud-stat" id="hudStat"></span>
+    </div>
+    <div id="moreMenu" class="more-menu" hidden>
+      <div class="menu-row"><span>Controls</span>
+        <div class="seg" role="radiogroup" aria-label="Controls">
+          <button type="button" data-mode="pc" role="radio">PC</button><button type="button" data-mode="mobile" role="radio">Mobile</button>
+        </div>
+      </div>
+      <form class="menu-row" id="joinForm" autocomplete="off">
+        <input id="joinInput" inputmode="numeric" pattern="[0-9]*" placeholder="Place ID (from a game's URL)" aria-label="Place ID">
+        <button class="btn small" type="submit">Join</button>
+      </form>
+      <div class="menu-row">
+        <button class="btn small ghost" type="button" id="restartBtn">Restart Roblox</button>
+        <button class="btn small ghost" type="button" id="soundBtn">Sound on</button>
+      </div>
+      <p class="menu-info" id="menuInfo"></p>
+    </div>
+    <input id="softKb" class="soft-kb" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="send" aria-label="Type into Roblox">
+  </section>
+
+  <dialog id="settings" class="settings">
+    <form method="dialog" class="settings-inner">
+      <div class="settings-head"><h2>Settings</h2><button class="icon-btn" value="close" aria-label="Close">✕</button></div>
+
+      <section>
+        <h3>Controls</h3>
+        <div class="choice" role="radiogroup" aria-label="Controls">
+          <button type="button" class="choice-btn" data-mode="pc" role="radio">
+            <strong>PC</strong><span>Keyboard and mouse. Cordial's keyboard mapping is on: WASD, Space, mouse look, chat.</span>
+          </button>
+          <button type="button" class="choice-btn" data-mode="mobile" role="radio">
+            <strong>Mobile</strong><span>Roblox's own touch thumbstick and jump button, several fingers at once. Keyboard mapping is off.</span>
+          </button>
+        </div>
+      </section>
+
+      <section>
+        <h3>Stream</h3>
+        <div class="seg wide" role="radiogroup" aria-label="Quality" id="qualitySeg">
+          <button type="button" data-quality="540" role="radio">Data saver · 540p</button>
+          <button type="button" data-quality="720" role="radio">Sharp · 720p</button>
+        </div>
+        <label class="field inline"><span>Release the GPU after</span>
+          <select id="limitSelect">
+            <option value="60">1 hour</option><option value="120">2 hours</option>
+            <option value="240">4 hours</option><option value="345">Almost 6 hours (the most a GitHub Action can run)</option>
+          </select>
+        </label>
+      </section>
+
+      <section>
+        <h3>GitHub</h3>
+        <label class="field"><span>Repository</span><input id="repoInput" placeholder="owner/name" spellcheck="false" autocapitalize="off"></label>
+        <label class="field"><span>Token</span><input id="tokenInput" type="password" placeholder="Not set" spellcheck="false" autocapitalize="off"></label>
+        <div class="row"><button type="button" class="btn small" id="saveGithub">Save and check</button><span class="msg" id="settingsGithubMsg" role="status"></span></div>
+      </section>
+
+      <section>
+        <h3>Google</h3>
+        <p id="settingsGoogle" class="muted">Not signed in.</p>
+        <div class="row"><button type="button" class="btn small ghost" id="signOut">Sign out</button></div>
+      </section>
+
+      <section>
+        <h3>This device</h3>
+        <p class="muted">The GitHub token and these settings are kept in this browser only. The Google sign-in is kept as an encrypted GitHub Actions secret.</p>
+        <div class="row"><button type="button" class="btn small danger" id="forget">Forget everything on this device</button></div>
+      </section>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <script src="vendor/nacl-fast.min.js"></script>
+  <script src="vendor/blake2b.js"></script>
+  <script src="vendor/jsmpeg.min.js"></script>
+  <script src="sealedbox.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

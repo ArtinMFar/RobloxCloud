@@ -1,0 +1,2 @@
+google-colab-cli==0.7.4
+pynacl==1.5.0
