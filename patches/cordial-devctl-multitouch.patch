@@ -1,3 +1,164 @@
+diff --git a/crates/cordial-runtime/src/android/looper.rs b/crates/cordial-runtime/src/android/looper.rs
+index 6c09c6c..e3319c5 100644
+--- a/crates/cordial-runtime/src/android/looper.rs
++++ b/crates/cordial-runtime/src/android/looper.rs
+@@ -741,6 +741,13 @@ fn no_close_exit() -> bool {
+     *ON.get_or_init(|| std::env::var_os("CORDIAL_NO_CLOSE_EXIT").is_some())
+ }
+ 
++/// Run once per pump tick, on the pump thread, when set.
++///
++/// The X11 backend's web views use it to advance GLib's default main context,
++/// which that backend otherwise never iterates (see `x11_web` in
++/// `bin/load.rs`).
++pub static TICK: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
++
+ pub fn pump(duration: std::time::Duration, game_activity_handle: Option<i64>) {
+     install_signal_handlers();
+     // `--run 0` means no deadline at all: run until the window is closed or a
+@@ -1300,6 +1307,9 @@ pub fn pump(duration: std::time::Duration, game_activity_handle: Option<i64>) {
+             // pump, and a socket handler is not the place to find out whether
+             // they mind. A no-op unless `CORDIAL_DEV_CONTROL` was set.
+             crate::devctl::apply_queued(handle);
++            if let Some(tick) = TICK.get() {
++                tick();
++            }
+             // Tell the engine when the user has switched away, and when they
+             // have come back.
+             //
+@@ -1400,6 +1410,9 @@ pub fn pump(duration: std::time::Duration, game_activity_handle: Option<i64>) {
+             // activity" every AGDK entry point already refuses by name; the
+             // plain JNI natives each verb also drives do not take one.
+             crate::devctl::apply_queued(0);
++            if let Some(tick) = TICK.get() {
++                tick();
++            }
+         }
+         looper_poll_once(
+             if watching { 50 } else { 8 },
+diff --git a/crates/cordial-runtime/src/bin/load.rs b/crates/cordial-runtime/src/bin/load.rs
+index 2aceca2..a44ef49 100644
+--- a/crates/cordial-runtime/src/bin/load.rs
++++ b/crates/cordial-runtime/src/bin/load.rs
+@@ -1397,15 +1397,100 @@ fn wire_battery_reporting(lib: linker::Library) {
+ /// plainly, once, why nothing will render: a build without the feature must
+ /// not silently swallow every `openWindow` with no explanation, which is
+ /// exactly the failure this whole module exists to end.
++/// Web views on the X11 backend.
++///
++/// The presenter below attaches every `openWindow` to the Wayland host window,
++/// which the X11 backend does not have, so there every request -- sign-up's
++/// captcha, sign-in challenges, Join, Robux -- was dropped and the engine sat
++/// on a blank screen. Here the pump thread takes GLib's default main context
++/// for good and advances it once per tick (nothing else iterates it on X11, and
++/// sources such as the battery report were already attached to it from this
++/// thread), so the presenter's `invoke`s land on the pump thread, which brings
++/// GTK up for X11 on first use and opens each request in a plain top-level
++/// window holding the same dialog the Wayland path shows.
++#[cfg(feature = "webview")]
++mod x11_web {
++    use gtk4::glib;
++    use gtk4::prelude::*;
++
++    /// On the pump thread, before the pump starts.
++    pub fn arm() {
++        match glib::MainContext::default().acquire() {
++            // Held for the life of the process: the pump thread is GTK's now.
++            Ok(guard) => std::mem::forget(guard),
++            Err(e) => {
++                println!("  webview: could not take GLib's main context ({e}); web views stay unavailable");
++                return;
++            }
++        }
++        let _ = cordial_runtime::android::looper::TICK.set(|| {
++            let context = glib::MainContext::default();
++            for _ in 0..64 {
++                if !context.iteration(false) {
++                    break;
++                }
++            }
++        });
++        println!("  webview: no Wayland host window; web views will open in their own X11 window");
++    }
++
++    fn gtk_up() -> bool {
++        static UP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++        *UP.get_or_init(|| {
++            // SAFETY: set before GTK is initialised, on the thread that is
++            // about to do it; nothing else here reads GDK's variables.
++            if let Err(e) = unsafe { glib::setenv("GDK_BACKEND", "x11", true) } {
++                println!("[webview] could not set GDK_BACKEND=x11: {e}");
++            }
++            gtk4::gdk::set_allowed_backends("x11");
++            // Not "Cordial": that WM_CLASS names the game window.
++            glib::set_prgname(Some("cordial-web"));
++            match libadwaita::init() {
++                Ok(()) => true,
++                Err(e) => {
++                    println!("[webview] GTK would not start on X11, so web views stay unavailable: {e}");
++                    false
++                }
++            }
++        })
++    }
++
++    /// The presenter's X11 half; runs on the pump thread.
++    pub fn open(request: cordial_runtime::webview::OpenWindowRequest) {
++        if !gtk_up() {
++            return;
++        }
++        let cookie =
++            cordial_runtime::webview::roblox_session_cookie(&cordial_runtime::profile::active());
++        let shell_request = cordial_runtime::webview::to_shell_request(&request, cookie);
++        let host = gtk4::Window::builder().title("Roblox").default_width(1280).default_height(720).build();
++        host.present();
++        match cordial_shell::webview::open(&host, &shell_request) {
++            Some(dialog) => {
++                use libadwaita::prelude::AdwDialogExt;
++                println!("[webview] presented an openWindow request in its own X11 window");
++                let window = host.clone();
++                dialog.connect_closed(move |_| {
++                    window.close();
++                    cordial_runtime::webview::report_window_closed();
++                });
++            }
++            None => {
++                host.close();
++                println!("[webview] openWindow request was refused by policy before it could be presented");
++            }
++        }
++    }
++}
++
+ #[cfg(feature = "webview")]
+ fn install_webview_presenter() {
+     cordial_runtime::webview::set_presenter(|request| {
+         gtk4::glib::MainContext::default().invoke(move || {
+             let Some(window) = cordial_runtime::android::wayland::current() else {
+-                println!(
+-                    "[webview] presenter ran with no Wayland host window open; nothing to attach \
+-                     the web window to"
+-                );
++                // No Wayland host window: this is the X11 backend. Open the
++                // page in a window of its own rather than dropping it.
++                x11_web::open(request);
+                 return;
+             };
+             // Fetched here, on the GTK thread, right before it is needed --
+@@ -1518,12 +1603,7 @@ fn install_webview_presenter() {
+     // AGENTS.md's rule against a stub that lies applies to a diagnostic too --
+     // reporting the gap up front is what keeps it findable.
+     if cordial_runtime::android::wayland::current().is_none() {
+-        println!(
+-            "  webview: WARNING -- there is no Wayland host window, so nothing can be attached \
+-             to and every openWindow (Join, sign-in, Robux) will be dropped. This run is on the \
+-             X11 backend -- either CORDIAL_X11 is set, or there is no WAYLAND_DISPLAY to use. \
+-             Web views need the Wayland backend."
+-        );
++        x11_web::arm();
+     }
+ }
+ 
 diff --git a/crates/cordial-runtime/src/devctl.rs b/crates/cordial-runtime/src/devctl.rs
 index 9e352db..d59bcdf 100644
 --- a/crates/cordial-runtime/src/devctl.rs

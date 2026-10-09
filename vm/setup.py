@@ -149,6 +149,13 @@ export DISPLAY=:99 XDG_RUNTIME_DIR=/run/user/$(id -u) HOME=/home/player
 export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus
 # Only NVIDIA's Vulkan driver, so Roblox renders on the GPU.
 [ -f /etc/vulkan/icd.d/nvidia_icd.json ] && export VK_ICD_FILENAMES=/etc/vulkan/icd.d/nvidia_icd.json
+# Roblox's web pages (captcha, Join) open in a GTK window on this display, which
+# has no GPU path for GTK or WebKit: render them in software.
+export GSK_RENDERER=cairo WEBKIT_DISABLE_DMABUF_RENDERER=1
+# WebKit's bubblewrap sandbox cannot start inside Colab's container (its D-Bus
+# proxy exits and WebKit aborts the whole game); this throwaway VM only ever
+# shows Roblox's own pages in it.
+export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
 # The streamer drives touches, text and joins through Cordial's devctl socket.
 export CORDIAL_DEV_CONTROL=1 CORDIAL_DEV_CONTROL_SOCKET=$XDG_RUNTIME_DIR/devctl.sock
 # Mobile mode tells Roblox this is a touchscreen, so it draws its thumbstick and
