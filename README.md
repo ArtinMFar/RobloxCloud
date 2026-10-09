@@ -15,15 +15,20 @@ NVIDIA Vulkan, not the earlier CPU/lavapipe version).
 
 ## Setting it up
 
-1. **Turn on GitHub Pages**: Settings → Pages → Build and deployment →
-   Source: **GitHub Actions**. Then run the *Publish the site* workflow (or
-   push to `site/`). The site is at `https://<owner>.github.io/RobloxCloud/`.
-2. Open the site and follow its steps:
+1. **Turn on GitHub Pages** (once): repository **Settings → Pages → Build and
+   deployment → Source: GitHub Actions**. Then **Actions → Publish the site →
+   Run workflow**. The site is at `https://<owner>.github.io/RobloxCloud/`.
+   Later pushes to `site/` publish it again by themselves.
+2. Make sure **Actions → Build multi-touch Cordial** has a green run; it
+   publishes the patched Cordial loader (release `cordial-0.27.0-multitouch`)
+   every VM downloads.
+3. Open the site and follow its steps:
    - **Connect GitHub** (once): a
      [fine-grained token](https://github.com/settings/personal-access-tokens/new)
-     for this repository with *Actions: read and write*, *Secrets: read and
-     write* and *Commit statuses: read* (or a classic token with `repo`). It is
-     kept in that browser only.
+     with *Repository access: Only select repositories → RobloxCloud* and the
+     repository permissions *Actions: Read and write*, *Secrets: Read and
+     write*, *Commit statuses: Read-only* (or a classic token with `repo`). It
+     is kept in that browser only.
    - **Sign in with Google**: opens the same Google page as `colab`'s remote
      sign-in. Paste the code it shows. Takes about 40 seconds, because a
      GitHub Action finishes the sign-in with the colab CLI.
@@ -31,8 +36,12 @@ NVIDIA Vulkan, not the earlier CPU/lavapipe version).
      account cannot get an L4, T4 is picked automatically and the page says
      so, at sign-in (from Colab's own eligibility list) or when Play asks
      Colab for one.
-   - **Play**. The first start takes a few minutes (VM, Cordial, a 400 MB
-     Roblox download).
+   - **Play**. A start takes about 4 minutes (VM, Cordial, a 400 MB Roblox
+     download).
+4. **Signing in to Roblox** happens inside the stream. Roblox usually shows
+   its "Verifying you're not a bot" check for a new datacenter IP; it opens in
+   the stream and you solve it there. *Quick Sign-in* (a code approved on your
+   phone) does not work: Roblox refuses it when the VM is in another country.
 
 ## Controls
 
@@ -49,6 +58,12 @@ Settings → Controls, or the ⋯ menu while playing:
 
 The ⋯ menu also has *Join* (a place ID or a `roblox.com/games/…` link; you
 need to be signed in to Roblox), *Restart Roblox* and sound.
+
+A running session can be opened on another device with
+`https://<owner>.github.io/RobloxCloud/#join=<stream address>&k=<session key>`
+(the address is the `trycloudflare.com` one in the session's commit status;
+the key is in the first browser's `localStorage` under `rc.session`). The part
+after `#` never reaches a server; don't share it, it gives control of the game.
 
 ## How it fits together
 
@@ -77,12 +92,21 @@ site/ (GitHub Pages)  --GitHub API-->  .github/workflows/session.yml  (scripts/s
 - **Ending.** Stop cancels the run; its cleanup step runs `colab stop`. The VM
   is also released when nobody has been connected for 10 minutes, at the time
   limit in Settings, or after 6 hours (the longest a GitHub Action runs).
-- **Multi-touch.** Cordial's devctl socket takes one finger at a time.
-  `patches/cordial-devctl-multitouch.patch` adds `touch <down|move|up> <id> <x> <y>`;
-  *Build multi-touch Cordial* (`build-cordial.yml`) builds Cordial 0.27.0's
-  loader with it and publishes it as the `cordial-0.27.0-multitouch` release,
-  which the VM downloads. Without that release mobile mode still works, with
-  one finger.
+- **Cordial patch.** `patches/cordial-devctl-multitouch.patch` adds three
+  things to Cordial 0.27.0's loader; *Build multi-touch Cordial*
+  (`build-cordial.yml`) builds it and publishes it as the
+  `cordial-0.27.0-multitouch` release the VM downloads:
+  - `touch <down|move|up> <id> <x> <y>` on the devctl socket, so mobile mode
+    can put several fingers on the game at once (upstream: one);
+  - `editor`, the focused text box and what is typed in it, because Cordial's
+    X11 backend never draws typed text (the page draws it over the stream);
+  - web views on X11: upstream drops every Roblox web page (captcha, sign-in
+    checks, Join) when there is no Wayland window, which Colab never has; they
+    now open in their own window and show in the stream.
+- **Network.** The Cloudflare quick tunnel runs over HTTP/2 (TCP). Colab
+  throttles UDP so hard that QUIC carried 20 KB/s where HTTP/2 carried
+  12 MB/s from the same VM. Colab picks the VM's region; one test landed in
+  Singapore, about 230 ms from the US east coast.
 
 ## Things to know
 
