@@ -164,7 +164,7 @@ def login():
         "info": seal(json.dumps({"email": email, "gpus": gpus}), E["PAGE_PUBLIC_KEY"]),
     }
     made = github("POST", "/check-runs", {
-        "name": f"roblox-cloud-login/{SID}", "head_sha": E["GITHUB_SHA"], "status": "completed",
+        "name": f"roblox-cloud-login/{SID}", "head_sha": E.get("GITHUB_SHA"), "status": "completed",
         "conclusion": "success",
         "output": {"title": "Google sign-in (sealed)", "summary": json.dumps(result)}})
     if not made:

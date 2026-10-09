@@ -1,5 +1,5 @@
 diff --git a/crates/cordial-runtime/src/devctl.rs b/crates/cordial-runtime/src/devctl.rs
-index 9e352db..76d1fec 100644
+index 9e352db..d59bcdf 100644
 --- a/crates/cordial-runtime/src/devctl.rs
 +++ b/crates/cordial-runtime/src/devctl.rs
 @@ -84,8 +84,30 @@ pub enum Cmd {
@@ -33,10 +33,15 @@ index 9e352db..76d1fec 100644
  static QUEUE: Mutex<Vec<Cmd>> = Mutex::new(Vec::new());
  
  /// Commands accepted since start, so `info` can show the surface is live even
-@@ -472,6 +494,29 @@ fn handle(line: &str) -> String {
+@@ -472,6 +494,34 @@ fn handle(line: &str) -> String {
              },
              None => "err screenshot <path>".into(),
          },
++        // `editor`: the focused text box as the engine laid it out, and what is
++        // typed in it, for a client that draws the editor itself. The X11
++        // backend has no text overlay (that lives in the Wayland host window),
++        // so on X11 a typed character reaches the box and is never drawn.
++        "editor" => editor_line(),
 +        "touch" => {
 +            let phase = match it.next() {
 +                Some("down") => TouchPhase::Down,
@@ -63,7 +68,42 @@ index 9e352db..76d1fec 100644
          _ => format!("err unknown verb {verb:?}"),
      }
  }
-@@ -694,6 +739,19 @@ pub fn apply_queued(handle: i64) {
+@@ -529,6 +579,34 @@ fn xr_info() -> String {
+ /// socket's. That mirror is one signal-hop behind, and it is also precisely
+ /// what `send_current_text` hands the engine, so it is the more useful of the
+ /// two to assert on: it is what Roblox will be told.
++/// One line for `editor`: `ok focus=0`, or the box's surface rectangle, font
++/// size, whether it masks its text, the caret and the text, percent-encoded so
++/// it stays one line.
++fn editor_line() -> String {
++    if cordial_linker_sys::game_activity::focused_textbox().is_none() {
++        return "ok focus=0".into();
++    }
++    let (text, caret) = crate::android::input::text_buffer_peek();
++    let mut enc = String::with_capacity(text.len() * 3);
++    for b in text.bytes() {
++        if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
++            enc.push(b as char);
++        } else {
++            enc.push_str(&format!("%{b:02X}"));
++        }
++    }
++    match cordial_linker_sys::game_activity::focused_textbox_info() {
++        Some(i) => format!(
++            "ok focus=1 x={} y={} w={} h={} size={} password={} multiline={} xalign={} caret={caret} text={enc}",
++            i.x, i.y, i.width, i.height, i.font_size,
++            // The values `wayland.rs` masks on (Roblox's own enum, slot 10).
++            u8::from(matches!(i.text_input_type, 5 | 9 | 10)),
++            i.multiline, i.x_alignment,
++        ),
++        None => format!("ok focus=1 x=none caret={caret} text={enc}"),
++    }
++}
++
+ fn textbox_line() -> String {
+     let focus = cordial_linker_sys::game_activity::focused_textbox();
+     let (text, caret) = crate::android::input::text_buffer_peek();
+@@ -694,6 +772,19 @@ pub fn apply_queued(handle: i64) {
                      println!("  devctl: updatesurface {line}");
                  }
              }

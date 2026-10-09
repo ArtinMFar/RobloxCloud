@@ -687,6 +687,8 @@
     if (wakeLock) wakeLock.release().catch(() => {});
     wakeLock = null;
     pointers.clear();
+    editor = { focus: false };
+    placeEditor();
     $("#moreMenu").hidden = true;
     $("#lockHint").hidden = true;
   }
@@ -783,6 +785,7 @@
         return;
       }
       if (m.t === "state") onServerState(m);
+      else if (m.t === "editor") onEditor(m);
       else if (m.t === "pong" && typeof m.ts === "number") {
         lastRtt = Math.round(performance.now() - m.ts);
         updateStat();
@@ -835,6 +838,58 @@
           : " · Several fingers at once."
         : " · Keyboard and mouse.");
   }
+
+  // ------------------------------------------------------------- text boxes
+  // Cordial draws what is typed into a Roblox text box in its own editor
+  // overlay, which only its Wayland backend has; on the VM's X11 display the
+  // characters reach the box but are never drawn. The streamer reports the
+  // focused box (where it is, its font size, whether it hides its text) and
+  // its contents, and this draws them in place over the picture.
+  let editor = { focus: false };
+  function onEditor(m) {
+    editor = m;
+    placeEditor();
+  }
+  function placeEditor() {
+    const box = $("#editorBox");
+    const btn = $("#typeHere");
+    if (!editor.focus || editor.x === undefined || $("#stage").hidden) {
+      box.hidden = btn.hidden = true;
+      return;
+    }
+    const r = canvas.getBoundingClientRect();
+    const st = $("#stage").getBoundingClientRect();
+    const s = r.width / dims().w;
+    const left = r.left - st.left + editor.x * s;
+    const top = r.top - st.top + editor.y * s;
+    Object.assign(box.style, {
+      left: `${left}px`,
+      top: `${top}px`,
+      width: `${Math.max(4, editor.w * s)}px`,
+      height: `${Math.max(4, editor.h * s)}px`,
+      fontSize: `${Math.max(8, editor.size * s)}px`,
+    });
+    box.className = "editor-box" + (editor.xalign === 2 ? " center" : editor.xalign === 1 ? " right" : "");
+    const chars = [...(editor.password ? "•".repeat([...editor.text].length) : editor.text)];
+    const at = Math.min(Math.max(editor.caret | 0, 0), chars.length);
+    const caret = document.createElement("span");
+    caret.className = "caret";
+    box.replaceChildren(document.createTextNode(chars.slice(0, at).join("")), caret, document.createTextNode(chars.slice(at).join("")));
+    box.hidden = false;
+    // A phone shows its keyboard only for a tap, so offer one by the box.
+    const touchy = settings.mode === "mobile" || hasTouch;
+    btn.hidden = !touchy || document.activeElement === softKb;
+    if (!btn.hidden) {
+      btn.style.left = `${Math.max(8, left)}px`;
+      btn.style.top = `${Math.min(st.height - 50, top + editor.h * s + 8)}px`;
+    }
+  }
+  $("#typeHere").addEventListener("click", () => {
+    softKb.value = kbLast = PREFIX;
+    softKb.focus();
+    $("#typeHere").hidden = true;
+  });
+  addEventListener("resize", () => setTimeout(placeEditor, 50));
 
   // ------------------------------------------------------------------- input
   const pointers = new Map(); // pointerId -> {x, y, dirty}
@@ -1044,6 +1099,7 @@
     }
   }
   softKb.addEventListener("input", kbDiff);
+  softKb.addEventListener("blur", () => setTimeout(placeEditor, 100));
   softKb.addEventListener("compositionstart", () => (composing = true));
   softKb.addEventListener("compositionend", () => {
     composing = false;

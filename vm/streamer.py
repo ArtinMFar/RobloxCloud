@@ -24,6 +24,7 @@ Both websockets require ?k=<session key>; only its SHA-256 is known here.
 
 import argparse
 import asyncio
+import collections
 import hashlib
 import hmac
 import json
@@ -33,6 +34,7 @@ import signal
 import subprocess
 import sys
 import time
+import urllib.parse
 
 from aiohttp import WSMsgType, web
 from Xlib import X, XK
@@ -69,14 +71,20 @@ def log(*a):
 
 
 class Devctl:
-    """A line-oriented client for Cordial's development control socket."""
+    """A line-oriented client for Cordial's development control socket.
+
+    One reply line comes back per command, in order, so replies are matched to
+    commands by a queue: `send` ignores its reply, `ask` waits for it.
+    """
 
     def __init__(self, path):
         self.path = path
         self.writer = None
         self.multi_touch = None  # unknown until probed
+        self.editor = None  # whether the `editor` verb exists; unknown until asked
         self.on_probe = None
         self.lock = asyncio.Lock()
+        self.pending = collections.deque()
 
     async def _connect(self):
         if self.writer and not self.writer.is_closing():
@@ -86,35 +94,48 @@ class Devctl:
         except OSError:
             self.writer = None
             return False
+        self._fail_pending()
         asyncio.get_running_loop().create_task(self._drain(reader))
         self.multi_touch = None
         # The first reply says whether this is the multi-touch build: the
         # unpatched devctl answers "err unknown verb" to `touch`.
+        self.pending.append("probe")
         self.writer.write(b"touch cancel\n")
         await self.writer.drain()
         return True
 
+    def _fail_pending(self):
+        while self.pending:
+            fut = self.pending.popleft()
+            if isinstance(fut, asyncio.Future) and not fut.done():
+                fut.set_result(None)
+
     async def _drain(self, reader):
-        # One reply line per command; read them so the socket never backs up.
         while True:
             line = await reader.readline()
             if not line:
+                self._fail_pending()
                 return
             text = line.decode(errors="replace").strip()
-            if self.multi_touch is None and (text == "ok" or "unknown verb" in text):
+            waiter = self.pending.popleft() if self.pending else None
+            if waiter == "probe":
                 self.multi_touch = text == "ok"
                 log(f"devctl: multi-touch {'available' if self.multi_touch else 'NOT available (single finger)'}")
                 if self.on_probe:
                     self.on_probe()
-            if text.startswith("err"):
+            elif isinstance(waiter, asyncio.Future):
+                if not waiter.done():
+                    waiter.set_result(text)
+            elif text.startswith("err"):
                 log("devctl:", text)
 
-    async def send(self, line):
+    async def _write(self, line, waiter):
         async with self.lock:
             for _ in range(2):
                 if not await self._connect():
                     return False
                 try:
+                    self.pending.append(waiter)
                     self.writer.write((line + "\n").encode())
                     await self.writer.drain()
                     return True
@@ -122,10 +143,39 @@ class Devctl:
                     self.writer = None
             return False
 
+    async def send(self, line):
+        return await self._write(line, None)
+
+    async def ask(self, line, timeout=2.0):
+        fut = asyncio.get_running_loop().create_future()
+        if not await self._write(line, fut):
+            return None
+        try:
+            return await asyncio.wait_for(fut, timeout)
+        except asyncio.TimeoutError:
+            return None
+
     def reset(self):
         if self.writer:
             self.writer.close()
         self.writer = None
+        self._fail_pending()
+
+
+def parse_editor(reply):
+    """`editor`'s reply (patches/cordial-devctl-multitouch.patch) as a dict."""
+    fields = dict(part.split("=", 1) for part in reply.split()[1:] if "=" in part)
+    if fields.get("focus") != "1":
+        return {"focus": False}
+    out = {"focus": True, "text": urllib.parse.unquote(fields.get("text", "")),
+           "caret": int(fields.get("caret", "0") or 0)}
+    if fields.get("x", "none") != "none":
+        for k in ("x", "y", "w", "h", "size"):
+            out[k] = float(fields.get(k, "0"))
+        out["password"] = fields.get("password") == "1"
+        out["multiline"] = fields.get("multiline", "0") != "0"
+        out["xalign"] = int(fields.get("xalign", "0"))
+    return out
 
 
 class Screen:
@@ -156,13 +206,14 @@ class Screen:
                 if attrs.map_state != X.IsViewable:
                     continue
                 g = win.get_geometry()
-                name = win.get_wm_name() or ""
+                wm_class = win.get_wm_class() or ()
             except xerror.XError:
                 continue
-            if isinstance(name, bytes):
-                name = name.decode(errors="replace")
             found.append((win.id, g.x, g.y, g.width, g.height))
-            if name == "Roblox" or (name.startswith("Roblox") and "Set up" not in name):
+            # Cordial's game window carries WM_CLASS class "Cordial"
+            # (cordial-runtime's window.rs); its launcher, also titled
+            # "Cordial <version>", is GTK's "cordial".
+            if len(wm_class) == 2 and wm_class[1] == "Cordial":
                 roblox = win
         self.windows = found
         if roblox is None:
@@ -378,6 +429,7 @@ class Streamer:
         self.last_client = time.time()
         self.stopped = False
         self.restarting = False
+        self.last_editor = None
         self.fingers = {}  # browser pointer id -> ("game"|"x", contact id)
         self.x_finger = None  # the browser pointer driving the X mouse in mobile mode
 
@@ -445,6 +497,7 @@ class Streamer:
         self.last_client = time.time()
         log("controller connected")
         await ws.send_str(json.dumps(self.state()))
+        self.last_editor = None  # resend it to the new page
         try:
             async for msg in ws:
                 if msg.type != WSMsgType.TEXT:
@@ -618,6 +671,7 @@ class Streamer:
         self.restarting = True
         await self.broadcast(self.state())
         self.devctl.reset()
+        self.video.audio = True  # the restart takes PulseAudio down and up again
         try:
             proc = await asyncio.create_subprocess_exec(
                 sys.executable, self.cfg["launcher"], "--restart",
@@ -646,9 +700,31 @@ class Streamer:
                        "game": self.screen.roblox is not None, "mode": self.mode}, f)
         os.replace(tmp, self.cfg["state_file"])
 
+    async def poll_editor(self):
+        """Send the page the focused text box and its text whenever they change.
+
+        Cordial's X11 backend never draws what is typed into a box (its editor
+        overlay is Wayland-only), so the page draws it over the stream."""
+        reply = await self.devctl.ask("editor", timeout=1.0)
+        if reply is None:
+            return
+        if "unknown verb" in reply:
+            self.devctl.editor = False
+            log("devctl: no `editor` verb in this Cordial build; typed text will not show")
+            return
+        self.devctl.editor = True
+        try:
+            ed = parse_editor(reply)
+        except ValueError:
+            return
+        if ed != self.last_editor:
+            self.last_editor = ed
+            await self.broadcast({"t": "editor", **ed})
+
     async def housekeeping(self):
         last_scan = 0.0
         last_state = 0.0
+        last_editor = 0.0
         was_locked, had_game = False, None
         while True:
             now = time.monotonic()
@@ -664,6 +740,9 @@ class Streamer:
             if locked != was_locked or game != had_game:
                 was_locked, had_game = locked, game
                 await self.broadcast(self.state())
+            if self.ctl_clients and game and self.devctl.editor is not False and now - last_editor > 0.15:
+                last_editor = now
+                await self.poll_editor()
             if now - last_state > 5:
                 last_state = now
                 self.write_state()
@@ -691,7 +770,8 @@ def main():
             raise web.GracefulExit()
 
         async def on_sigterm():
-            await st.stop("the VM is shutting down")
+            # Leave the game alone: a restarted streamer picks it up again.
+            st.video.stop()
             loop.call_soon(leave)
 
         loop.add_signal_handler(signal.SIGTERM, lambda: loop.create_task(on_sigterm()))

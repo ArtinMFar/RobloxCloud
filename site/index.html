@@ -129,6 +129,9 @@
 
   <section id="stage" class="stage" hidden>
     <canvas id="video" class="video" tabindex="0" aria-label="Roblox"></canvas>
+    <!-- What is typed into the focused Roblox text box: Cordial's X11 backend does not draw it. -->
+    <div id="editorBox" class="editor-box" hidden></div>
+    <button id="typeHere" class="type-here" type="button" hidden>⌨ Tap to type</button>
     <div id="stageOverlay" class="stage-overlay">
       <div class="overlay-card">
         <div class="spinner" id="overlaySpinner"></div>

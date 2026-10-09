@@ -29,9 +29,9 @@ def x(cmd):
                           env={**os.environ, "DISPLAY": DISPLAY})
 
 
-def find_window(name):
-    """Geometry (id, x, y, w, h) of the first visible window with exactly this name."""
-    r = x(f"xdotool search --onlyvisible --name '^{name}$'")
+def find_window(pattern):
+    """Geometry (id, x, y, w, h) of the first visible window whose name matches the regex."""
+    r = x(f"xdotool search --onlyvisible --name '{pattern}'")
     for wid in r.stdout.split():
         g = x(f"xdotool getwindowgeometry --shell {wid}").stdout
         v = dict(line.split("=", 1) for line in g.split() if "=" in line)
@@ -42,10 +42,10 @@ def find_window(name):
     return None
 
 
-def wait_window(name, timeout):
+def wait_window(pattern, timeout):
     end = time.time() + timeout
     while time.time() < end:
-        w = find_window(name)
+        w = find_window(pattern)
         if w:
             return w
         time.sleep(1)
@@ -80,18 +80,21 @@ def screenshot(name):
 
 
 def main():
-    restart = "--restart" in sys.argv
-    if restart:
+    if "--restart" in sys.argv:
         status("launch", "Restarting Roblox")
-        subprocess.run("pkill -u player -f cordial-run; pkill -u player -f cordial-shell; sleep 2; "
-                       "pkill -KILL -u player -f cordial-run; pkill -KILL -u player -f cordial-shell", shell=True)
-        time.sleep(1)
+    # Cordial is single-instance, and its launcher reattaches to a game process
+    # it finds still running (which renames itself, so `pkill cordial` misses
+    # it). A leftover would swallow this start, so begin from nothing: every
+    # process of the player's goes, and as_player.sh brings back D-Bus and
+    # PulseAudio.
+    if subprocess.run("pgrep -u player >/dev/null", shell=True).returncode == 0:
+        subprocess.run("pkill -u player cordial; sleep 2; pkill -KILL -u player; sleep 1", shell=True)
 
     os.makedirs("/tmp/rc", exist_ok=True)
     subprocess.Popen(f"runuser -u player -- {AS_PLAYER} cordial", shell=True,
                      stdout=open(LOG, "w"), stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                      start_new_session=True)
-    launcher = wait_window("Cordial", 90)
+    launcher = wait_window("^Cordial( |$)", 90)  # "Cordial 0.27.0 (0814e2d)"
     if not launcher:
         screenshot("fail-launcher")
         status("error", "Cordial's launcher did not open")
@@ -100,7 +103,7 @@ def main():
     status("launch", "Starting Roblox")
     click_rel(launcher, 380 / 760, 432 / 800)  # "Roblox"
 
-    setup = wait_window("Set up Roblox", 25)
+    setup = wait_window("^Set up Roblox", 25)
     if setup:  # first run on this VM: no Roblox build yet
         time.sleep(3)
         status("download", "Downloading Roblox (about 400 MB, checked against Roblox's signature)")

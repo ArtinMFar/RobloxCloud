@@ -154,8 +154,12 @@ export CORDIAL_DEV_CONTROL=1 CORDIAL_DEV_CONTROL_SOCKET=$XDG_RUNTIME_DIR/devctl.
 # Mobile mode tells Roblox this is a touchscreen, so it draws its thumbstick and
 # jump button; PC mode tells it there is none.
 export CORDIAL_INPUT_TOUCH=$(cat /content/rc/touch 2>/dev/null || echo 0)
-[ -S $XDG_RUNTIME_DIR/bus ] || (setsid dbus-daemon --session --nofork --address=$DBUS_SESSION_BUS_ADDRESS >/tmp/rc/player-dbus.log 2>&1 &)
-sleep 0.5
+# A bus killed with the game leaves its socket behind, so ask it rather than test the file.
+if ! dbus-send --bus=$DBUS_SESSION_BUS_ADDRESS --print-reply --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.GetId >/dev/null 2>&1; then
+  rm -f $XDG_RUNTIME_DIR/bus
+  (setsid dbus-daemon --session --nofork --address=$DBUS_SESSION_BUS_ADDRESS >/tmp/rc/player-dbus.log 2>&1 &)
+  for i in 1 2 3 4 5 6 7 8 9 10; do [ -S $XDG_RUNTIME_DIR/bus ] && break; sleep 0.2; done
+fi
 # Roblox stops when an experience starts if it cannot open an audio device.
 pactl info >/dev/null 2>&1 || pulseaudio --start --exit-idle-time=-1 --log-target=file:/tmp/rc/player-pulse.log
 exec "$@"
@@ -196,9 +200,11 @@ for _ in range(40):
 else:
     fail("The streamer did not start: " + open("/tmp/rc/streamer.log").read()[-400:])
 
+# HTTP/2 over TCP, never QUIC: Colab throttles UDP so hard that a QUIC tunnel
+# carried 20 KB/s where an HTTP/2 one carried 12 MB/s, measured from the same VM.
 url = None
-for protocol in ("auto", "http2"):
-    bg(f"cloudflared tunnel --no-autoupdate --protocol {protocol} --url http://127.0.0.1:{port}",
+for attempt in range(2):
+    bg(f"cloudflared tunnel --no-autoupdate --protocol http2 --url http://127.0.0.1:{port}",
        "/tmp/rc/cloudflared.log")
     end = time.time() + 45
     while time.time() < end and not url:
