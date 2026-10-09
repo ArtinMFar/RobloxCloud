@@ -600,10 +600,12 @@
     s.stopping = true;
     send({ t: "stop" });
     $("#launchMsg").textContent = "Stopping…";
-    try {
-      await gh(`${repoPath()}/actions/runs/${s.runId}/cancel`, { method: "POST" });
-    } catch (err) {
-      if (err.status !== 409) toast(err.message, "error"); // 409: the run already finished
+    if (s.runId) {
+      try {
+        await gh(`${repoPath()}/actions/runs/${s.runId}/cancel`, { method: "POST" });
+      } catch (err) {
+        if (err.status !== 409) toast(err.message, "error"); // 409: the run already finished
+      }
     }
     endSession("Stopped. The Colab VM is being released.", false);
   }
@@ -1239,10 +1241,21 @@
   $("#settings").addEventListener("close", () => renderHome());
 
   // -------------------------------------------------------------------- start
+  // A link to a session that is already running, from another device or a
+  // person helping: #join=<stream address>&k=<session key>. The hash never
+  // leaves the browser, and it is dropped from the address bar once read.
+  const shared = new URLSearchParams(location.hash.slice(1));
+  if (shared.get("join") && shared.get("k") && isStreamUrl(shared.get("join"))) {
+    history.replaceState(null, "", location.pathname + location.search);
+    session = { sid: "shared", key: shared.get("k"), runId: null, at: Date.now(), gpu: "", mode: settings.mode, w: 1280, h: 720, url: shared.get("join"), shared: true };
+    openStage();
+  }
   renderHome();
   applyGpuEligibility(false);
   if (store.get("rc.login")) waitForLogin();
-  if (session && Date.now() - session.at < 6 * 3600e3) {
+  if (session && session.shared) {
+    // opened from a join link above
+  } else if (session && Date.now() - session.at < 6 * 3600e3) {
     // A session from before a reload: pick it up again.
     session.url = null;
     startLaunchView();
