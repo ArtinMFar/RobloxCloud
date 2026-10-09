@@ -37,10 +37,10 @@ index 6c09c6c..e3319c5 100644
          looper_poll_once(
              if watching { 50 } else { 8 },
 diff --git a/crates/cordial-runtime/src/bin/load.rs b/crates/cordial-runtime/src/bin/load.rs
-index 2aceca2..a44ef49 100644
+index 2aceca2..2e8deb6 100644
 --- a/crates/cordial-runtime/src/bin/load.rs
 +++ b/crates/cordial-runtime/src/bin/load.rs
-@@ -1397,15 +1397,100 @@ fn wire_battery_reporting(lib: linker::Library) {
+@@ -1397,15 +1397,106 @@ fn wire_battery_reporting(lib: linker::Library) {
  /// plainly, once, why nothing will render: a build without the feature must
  /// not silently swallow every `openWindow` with no explanation, which is
  /// exactly the failure this whole module exists to end.
@@ -121,6 +121,12 @@ index 2aceca2..a44ef49 100644
 +                    window.close();
 +                    cordial_runtime::webview::report_window_closed();
 +                });
++                // The engine closes the page itself when a check passes
++                // (`closeWindow`), and that path does not end in `closed`:
++                // without this the empty host window stayed on top of the
++                // game as a blank white screen.
++                let window = host.clone();
++                dialog.connect_unmap(move |_| window.close());
 +            }
 +            None => {
 +                host.close();
@@ -145,7 +151,7 @@ index 2aceca2..a44ef49 100644
                  return;
              };
              // Fetched here, on the GTK thread, right before it is needed --
-@@ -1518,12 +1603,7 @@ fn install_webview_presenter() {
+@@ -1518,12 +1609,7 @@ fn install_webview_presenter() {
      // AGENTS.md's rule against a stub that lies applies to a diagnostic too --
      // reporting the gap up front is what keeps it findable.
      if cordial_runtime::android::wayland::current().is_none() {
