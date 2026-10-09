@@ -102,7 +102,11 @@ site/ (GitHub Pages)  --GitHub API-->  .github/workflows/session.yml  (scripts/s
     X11 backend never draws typed text (the page draws it over the stream);
   - web views on X11: upstream drops every Roblox web page (captcha, sign-in
     checks, Join) when there is no Wayland window, which Colab never has; they
-    now open in their own window and show in the stream.
+    now open in their own window and show in the stream. The pages are told
+    they are in the Android app, because under Cordial's default Windows
+    identity a check page looks for the Windows app's bridge, never reports
+    back, and Roblox returns to sign-in after 60 seconds. The game itself
+    keeps the Windows identity.
 - **Network.** The Cloudflare quick tunnel runs over HTTP/2 (TCP). Colab
   throttles UDP so hard that QUIC carried 20 KB/s where HTTP/2 carried
   12 MB/s from the same VM. Colab picks the VM's region; one test landed in

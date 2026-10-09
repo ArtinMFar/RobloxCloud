@@ -37,10 +37,10 @@ index 6c09c6c..e3319c5 100644
          looper_poll_once(
              if watching { 50 } else { 8 },
 diff --git a/crates/cordial-runtime/src/bin/load.rs b/crates/cordial-runtime/src/bin/load.rs
-index 2aceca2..2e8deb6 100644
+index 2aceca2..67ae158 100644
 --- a/crates/cordial-runtime/src/bin/load.rs
 +++ b/crates/cordial-runtime/src/bin/load.rs
-@@ -1397,15 +1397,106 @@ fn wire_battery_reporting(lib: linker::Library) {
+@@ -1397,15 +1397,128 @@ fn wire_battery_reporting(lib: linker::Library) {
  /// plainly, once, why nothing will render: a build without the feature must
  /// not silently swallow every `openWindow` with no explanation, which is
  /// exactly the failure this whole module exists to end.
@@ -102,6 +102,27 @@ index 2aceca2..2e8deb6 100644
 +        })
 +    }
 +
++    /// Roblox's pages choose how they talk back to the app from the
++    /// User-Agent. Under the default Windows identity a check page looks for
++    /// the Windows app's `window.external`, which does not exist here, so it
++    /// never reports that it loaded or passed, and the engine gives up after
++    /// 60 seconds and goes back to sign-up or sign-in. The pages are told
++    /// this is the Android app instead (the string Cordial's own
++    /// `android-tablet` identity sends), whose `__globalRobloxAndroidBridge__`
++    /// Cordial provides; the engine keeps its own identity.
++    fn android_user_agent(ua: &str) -> String {
++        const WINDOWS: &str = "ROBLOX Windows App ";
++        let Some(at) = ua.find(WINDOWS) else {
++            return ua.to_string();
++        };
++        let version = ua[at + WINDOWS.len()..].split(' ').next().unwrap_or_default();
++        let device = ua[..at].replacen("; Cordial)", "; Cordial; 33)", 1);
++        format!(
++            "{device}ROBLOX Android App {version} Tablet Hybrid()  GooglePlayStore \
++             RobloxApp/{version} (GlobalDist; GooglePlayStore)"
++        )
++    }
++
 +    /// The presenter's X11 half; runs on the pump thread.
 +    pub fn open(request: cordial_runtime::webview::OpenWindowRequest) {
 +        if !gtk_up() {
@@ -109,7 +130,8 @@ index 2aceca2..2e8deb6 100644
 +        }
 +        let cookie =
 +            cordial_runtime::webview::roblox_session_cookie(&cordial_runtime::profile::active());
-+        let shell_request = cordial_runtime::webview::to_shell_request(&request, cookie);
++        let mut shell_request = cordial_runtime::webview::to_shell_request(&request, cookie);
++        shell_request.user_agent = shell_request.user_agent.map(|ua| android_user_agent(&ua));
 +        let host = gtk4::Window::builder().title("Roblox").default_width(1280).default_height(720).build();
 +        host.present();
 +        match cordial_shell::webview::open(&host, &shell_request) {
@@ -151,7 +173,7 @@ index 2aceca2..2e8deb6 100644
                  return;
              };
              // Fetched here, on the GTK thread, right before it is needed --
-@@ -1518,12 +1609,7 @@ fn install_webview_presenter() {
+@@ -1518,12 +1631,7 @@ fn install_webview_presenter() {
      // AGENTS.md's rule against a stub that lies applies to a diagnostic too --
      // reporting the gap up front is what keeps it findable.
      if cordial_runtime::android::wayland::current().is_none() {
