@@ -332,37 +332,47 @@ class Screen:
         return self.locked
 
 
-class Video:
-    """One ffmpeg, many viewers."""
+class Stream:
+    """One ffmpeg, many viewers: the picture (`video`) or the sound (`audio`).
 
-    def __init__(self, cfg):
+    Two streams rather than one with both: in one ffmpeg, the audio input
+    started a second or two after the frames, and ffmpeg works on whichever
+    input is furthest behind, so every frame waited in its queue for the sound
+    to catch up -- 1.5 to 2.2 s from a key press to the picture, measured,
+    against 0.2 s for the picture alone. Apart, neither waits for the other.
+    """
+
+    def __init__(self, cfg, kind):
         self.cfg = cfg
+        self.kind = kind
         self.viewers = set()
         self.proc = None
-        self.audio = True
         self.running = True
 
     def command(self):
         c = self.cfg
-        w, h, fps, br = c["width"], c["height"], c["fps"], c["bitrate"]
-        if c.get("capture") == "x11grab":
+        if self.kind == "audio":
             prefix = ""
-            video_in = ["-thread_queue_size", "64", "-f", "x11grab", "-draw_mouse", "0", "-framerate", str(fps),
-                        "-video_size", f"{w}x{h}", "-i", f"{c['display']}.0+0,0"]
+            cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+                   "-f", "pulse", "-fragment_size", "2048", "-i", c.get("audio_source") or "default",
+                   "-f", "mpegts", "-c:a", "mp2", "-b:a", "128k", "-ar", "44100", "-ac", "2"]
         else:
-            # No MIT-SHM on this display (see vm/setup.py), and ffmpeg's x11grab
-            # gets no frames without it, so frames come from vm/xcapture.py.
-            prefix = shlex.join([sys.executable, c["xcapture"], c["display"], "0", "0", str(w), str(h), str(fps)]) + " | "
-            video_in = ["-thread_queue_size", "64", "-use_wallclock_as_timestamps", "1", "-f", "rawvideo",
-                        "-pix_fmt", "bgr0", "-video_size", f"{w}x{h}", "-framerate", str(fps), "-i", "pipe:0"]
-        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin"] + video_in
-        if self.audio:
-            cmd += ["-thread_queue_size", "1024", "-f", "pulse", "-fragment_size", "4096",
-                    "-i", c.get("audio_source") or "default"]
-        cmd += ["-f", "mpegts", "-c:v", "mpeg1video", "-fps_mode", "cfr", "-r", str(fps),
-                "-b:v", f"{br}k", "-maxrate", f"{br}k", "-bufsize", f"{max(br // 2, 500)}k", "-g", str(fps), "-bf", "0"]
-        if self.audio:
-            cmd += ["-c:a", "mp2", "-b:a", "128k", "-ar", "44100", "-ac", "2"]
+            w, h, fps, br = c["width"], c["height"], c["fps"], c["bitrate"]
+            if c.get("capture") == "x11grab":
+                prefix = ""
+                video_in = ["-f", "x11grab", "-draw_mouse", "0", "-framerate", str(fps),
+                            "-video_size", f"{w}x{h}", "-i", f"{c['display']}.0+0,0"]
+            else:
+                # No MIT-SHM on this display (see vm/setup.py), and ffmpeg's
+                # x11grab gets no frames without it, so frames come from
+                # vm/xcapture.py.
+                prefix = shlex.join([sys.executable, c["xcapture"], c["display"], "0", "0",
+                                     str(w), str(h), str(fps)]) + " | "
+                video_in = ["-f", "rawvideo", "-pix_fmt", "bgr0", "-video_size", f"{w}x{h}",
+                            "-framerate", str(fps), "-i", "pipe:0"]
+            cmd = (["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin"] + video_in +
+                   ["-f", "mpegts", "-c:v", "mpeg1video", "-b:v", f"{br}k", "-maxrate", f"{br}k",
+                    "-bufsize", f"{max(br // 2, 500)}k", "-g", str(fps), "-bf", "0"])
         cmd += ["-flush_packets", "1", "-muxdelay", "0.001", "pipe:1"]
         # As the player, for its PulseAudio; Xvfb lets local users in.
         return ["runuser", "-u", c["user"], "--", c["as_player"], "sh", "-c", prefix + shlex.join(cmd)]
@@ -371,7 +381,7 @@ class Video:
         failures = 0
         while self.running:
             started = time.monotonic()
-            log("video:", self.command()[-1])
+            log(f"{self.kind}:", self.command()[-1])
             self.proc = await asyncio.create_subprocess_exec(
                 *self.command(), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 start_new_session=True)
@@ -393,16 +403,9 @@ class Video:
             err = (await err_task).decode(errors="replace").strip()
             if not self.running:
                 return
-            log(f"ffmpeg exited {self.proc.returncode}: {err[-500:]}")
-            if time.monotonic() - started < 5:
-                failures += 1
-                if self.audio and failures >= 2:
-                    log("ffmpeg keeps failing with audio; streaming video only")
-                    self.audio = False
-                    failures = 0
-            else:
-                failures = 0
-            await asyncio.sleep(min(5, 0.5 * (failures + 1)))
+            log(f"{self.kind} ffmpeg exited {self.proc.returncode}: {err[-500:]}")
+            failures = failures + 1 if time.monotonic() - started < 5 else 0
+            await asyncio.sleep(min(10, 0.5 * (failures + 1)))
 
     def stop(self):
         self.running = False
@@ -424,7 +427,8 @@ class Streamer:
         log("capture:", cfg["capture"])
         self.devctl = Devctl(cfg["devctl"])
         self.devctl.on_probe = lambda: asyncio.get_running_loop().create_task(self.broadcast(self.state()))
-        self.video = Video(cfg)
+        self.video = Stream(cfg, "video")
+        self.audio = Stream(cfg, "audio")
         self.ctl_clients = set()
         self.last_client = time.time()
         self.stopped = False
@@ -462,13 +466,19 @@ class Streamer:
                                  headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-store"})
 
     async def video_ws(self, request):
+        return await self.viewer_ws(request, self.video)
+
+    async def audio_ws(self, request):
+        return await self.viewer_ws(request, self.audio)
+
+    async def viewer_ws(self, request, stream):
         if not self.authorised(request):
             return web.Response(status=403, text="bad key")
         ws = web.WebSocketResponse(max_msg_size=1 << 16, heartbeat=20)
         await ws.prepare(request)
         q = asyncio.Queue()
-        self.video.viewers.add(q)
-        log("video viewer connected")
+        stream.viewers.add(q)
+        log(f"{stream.kind} viewer connected")
 
         async def pump():
             while True:
@@ -484,8 +494,8 @@ class Streamer:
                 pass
         finally:
             sender.cancel()
-            self.video.viewers.discard(q)
-            log("video viewer left")
+            stream.viewers.discard(q)
+            log(f"{stream.kind} viewer left")
         return ws
 
     async def ctl_ws(self, request):
@@ -671,7 +681,6 @@ class Streamer:
         self.restarting = True
         await self.broadcast(self.state())
         self.devctl.reset()
-        self.video.audio = True  # the restart takes PulseAudio down and up again
         try:
             proc = await asyncio.create_subprocess_exec(
                 sys.executable, self.cfg["launcher"], "--restart",
@@ -688,6 +697,7 @@ class Streamer:
         log("stopping:", why)
         self.stopped = True
         self.video.stop()
+        self.audio.stop()
         subprocess.run(["pkill", "-KILL", "-u", self.cfg["user"]])
         self.write_state()
         await self.broadcast({"t": "stopped", "why": why})
@@ -760,18 +770,21 @@ def main():
     app = web.Application()
     app.router.add_get("/health", st.health)
     app.router.add_get("/video", st.video_ws)
+    app.router.add_get("/audio", st.audio_ws)
     app.router.add_get("/ctl", st.ctl_ws)
     app.router.add_get("/", lambda r: web.Response(text="RobloxCloud streamer\n"))
 
     async def start(app):
         loop = asyncio.get_running_loop()
-        app["tasks"] = [loop.create_task(st.video.run()), loop.create_task(st.housekeeping())]
+        app["tasks"] = [loop.create_task(st.video.run()), loop.create_task(st.audio.run()),
+                        loop.create_task(st.housekeeping())]
         def leave():  # SystemExit from a loop callback ends run_app, as aiohttp's own handler does
             raise web.GracefulExit()
 
         async def on_sigterm():
             # Leave the game alone: a restarted streamer picks it up again.
             st.video.stop()
+            st.audio.stop()
             loop.call_soon(leave)
 
         loop.add_signal_handler(signal.SIGTERM, lambda: loop.create_task(on_sigterm()))
@@ -782,6 +795,7 @@ def main():
         web.run_app(app, host="127.0.0.1", port=cfg["port"], print=None, access_log=None)
     finally:
         st.video.stop()
+        st.audio.stop()
 
 
 if __name__ == "__main__":

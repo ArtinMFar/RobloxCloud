@@ -625,7 +625,8 @@
   }
 
   // ------------------------------------------------------------------- stage
-  let player = null;
+  let player = null; // the picture
+  let sound = null; // the sound, a separate stream
   let ctl = null;
   let ctlBackoff = 1;
   let serverState = { locked: false, multiTouch: true };
@@ -645,13 +646,22 @@
     fit();
     const base = session.url.replace(/^http/, "ws");
     const k = encodeURIComponent(session.key);
+    // Picture and sound arrive as two streams (see vm/streamer.py's Stream):
+    // muxed together, the picture waited seconds for the sound.
+    sound = new JSMpeg.Player(`${base}/audio?k=${k}`, {
+      video: false,
+      audio: true,
+      pauseWhenHidden: false,
+      audioBufferSize: 256 * 1024,
+      maxAudioLag: 0.15,
+      reconnectInterval: 2,
+    });
     player = new JSMpeg.Player(`${base}/video?k=${k}`, {
       canvas,
-      audio: true,
+      audio: false,
       video: true,
       pauseWhenHidden: false,
       videoBufferSize: 4 * 1024 * 1024,
-      audioBufferSize: 512 * 1024,
       reconnectInterval: 2,
       onVideoDecode: () => {
         if (!firstFrame) {
@@ -670,12 +680,12 @@
 
   function closeStage() {
     clearInterval(pingTimer);
-    if (player) {
+    for (const p of [player, sound]) {
       try {
-        player.destroy();
+        if (p) p.destroy();
       } catch {}
-      player = null;
     }
+    player = sound = null;
     if (ctl) {
       const c = ctl;
       ctl = null;
@@ -705,7 +715,7 @@
   // Browsers only allow sound, fullscreen and the landscape lock after a tap or
   // click, so the first frame waits behind one.
   function readyToPlay() {
-    const ctx = player && player.audioOut && player.audioOut.context;
+    const ctx = sound && sound.audioOut && sound.audioOut.context;
     if (!isTouchFirst && audioUnlocked() && !(ctx && ctx.state === "suspended")) return;
     $("#stageOverlay").hidden = false;
     $("#overlaySpinner").hidden = true;
@@ -721,12 +731,12 @@
     canvas.focus();
   });
 
-  const audioUnlocked = () => !player || !player.audioOut || player.audioOut.unlocked !== false;
+  const audioUnlocked = () => !sound || !sound.audioOut || sound.audioOut.unlocked !== false;
   function unlockAudio() {
     try {
-      if (player && player.audioOut && player.audioOut.unlock) player.audioOut.unlock(() => {});
-      if (player && player.audioOut && player.audioOut.context && player.audioOut.context.state === "suspended")
-        player.audioOut.context.resume();
+      if (sound && sound.audioOut && sound.audioOut.unlock) sound.audioOut.unlock(() => {});
+      if (sound && sound.audioOut && sound.audioOut.context && sound.audioOut.context.state === "suspended")
+        sound.audioOut.context.resume();
     } catch {}
   }
   async function requestWakeLock() {
@@ -1135,7 +1145,7 @@
     $("#moreBtn").setAttribute("aria-expanded", String(open));
     wakeHud();
     updateStat();
-    $("#soundBtn").textContent = player && player.volume === 0 ? "Sound on" : "Sound off";
+    $("#soundBtn").textContent = sound && sound.volume === 0 ? "Sound on" : "Sound off";
   });
   $("#hud").addEventListener("pointerdown", wakeHud);
   $("#restartBtn").addEventListener("click", () => {
@@ -1144,10 +1154,10 @@
     overlay("Restarting Roblox…", true);
   });
   $("#soundBtn").addEventListener("click", () => {
-    if (!player) return;
+    if (!sound) return;
     unlockAudio();
-    player.volume = player.volume === 0 ? 1 : 0;
-    $("#soundBtn").textContent = player.volume === 0 ? "Sound on" : "Sound off";
+    sound.volume = sound.volume === 0 ? 1 : 0;
+    $("#soundBtn").textContent = sound.volume === 0 ? "Sound on" : "Sound off";
   });
   $("#joinForm").addEventListener("submit", (e) => {
     e.preventDefault();
