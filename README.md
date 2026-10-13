@@ -31,7 +31,10 @@ NVIDIA Vulkan, not the earlier CPU/lavapipe version).
      is kept in that browser only.
    - **Sign in with Google**: opens the same Google page as `colab`'s remote
      sign-in. Paste the code it shows. Takes about 40 seconds, because a
-     GitHub Action finishes the sign-in with the colab CLI.
+     GitHub Action finishes the sign-in with the colab CLI. If no Google tab
+     opens (a blocked pop-up, an in-app browser), **Show the link instead**
+     shows the same link with a Copy button, to paste into a new tab or
+     another browser; a code from either works.
    - **Pick a GPU**: L4 needs Colab Pro or pay-as-you-go compute units. If the
      account cannot get an L4, T4 is picked automatically and the page says
      so, at sign-in (from Colab's own eligibility list) or when Play asks
@@ -73,8 +76,9 @@ site/ (GitHub Pages)  --GitHub API-->  .github/workflows/session.yml  (scripts/s
    |  | commit status: progress, address   |  colab exec vm/setup.py
    |  +------------------------------------+
    |
-   +--wss /video, /ctl (Cloudflare quick tunnel)-->  vm/streamer.py on the Colab VM
-                                                      | ffmpeg: MPEG-1 + MP2 -> JSMpeg in the page
+   +--wss /video264, /video, /audio, /ctl ------->  vm/streamer.py on the Colab VM
+      (Cloudflare quick tunnel)                       | ffmpeg: H.264 on the GPU (NVENC), 60 fps -> WebCodecs
+                                                      |   else MPEG-1, 30 fps -> JSMpeg; MP2 sound -> JSMpeg
                                                       | PC input: XTest; mobile input: Cordial's devctl socket
                                                       +- Cordial + Roblox on Xvfb, rendered by NVIDIA Vulkan
 ```
@@ -89,6 +93,19 @@ site/ (GitHub Pages)  --GitHub API-->  .github/workflows/session.yml  (scripts/s
 - **Progress.** The workflow posts commit statuses (`roblox-cloud/<id>`) that
   the page polls; the last one carries the stream's address. The stream only
   accepts the session key the page made (the workflow only sees its SHA-256).
+- **Video.** `vm/xcapture.py` reads the frames straight from Xvfb's
+  framebuffer, which Xvfb keeps in a memory-mapped file (`-fbdir`), holding the
+  X server for well under a millisecond a frame where XGetImage held it for
+  14 ms. The raw frames go to NVENC, which also converts them to YUV, so the
+  CPU only copies them: about a quarter of one core at 60 fps, where MPEG-1 at
+  30 fps took 43% for the encoder alone. Measured on an L4: a steady 60 fps
+  through the tunnel and 5 to 21 ms from a change on the screen to its frame
+  leaving the VM. The page decodes the H.264 stream with WebCodecs on the
+  device's hardware decoder (`site/h264player.js`), and plays the earlier
+  MPEG-1 stream with JSMpeg instead when the browser has no WebCodecs or no
+  hardware H.264 decoder, when the VM's NVENC does not work, when decoding
+  fails during play, or when Settings → Stream says *Compatible*. Each picture
+  stream's encoder only runs while someone watches it.
 - **Ending.** Stop cancels the run; its cleanup step runs `colab stop`. The VM
   is also released when nobody has been connected for 10 minutes, at the time
   limit in Settings, or after 6 hours (the longest a GitHub Action runs).

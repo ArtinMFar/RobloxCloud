@@ -324,6 +324,7 @@ def play():
     cfg = {
         "key_hash": E["KEY_HASH"], "mode": E.get("MODE", "pc"), "width": w - w % 2, "height": h - h % 2,
         "fps": int(E.get("FPS") or 30), "bitrate": int(E.get("BITRATE") or 3500),
+        "h264_fps": int(E.get("H264_FPS") or 60), "h264_bitrate": int(E.get("H264_BITRATE") or 0),
         "cordial_run_url": E.get("CORDIAL_RUN_URL", ""), "cordial_run_sha256": E.get("CORDIAL_RUN_SHA256", ""),
     }
     ready = run_setup(cfg)

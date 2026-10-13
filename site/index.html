@@ -61,16 +61,30 @@
         <div class="step-body">
           <p>This opens the same Google page as the <code>colab</code> command-line tool. Approve it, then copy the
             authorization code Google shows and paste it here.</p>
+          <div class="row">
           <button id="googleBtn" class="btn google" type="button">
             <svg viewBox="0 0 48 48" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="m6.3 14.7 6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z"/></svg>
             Sign in with Google
           </button>
+          <button id="googleLinkBtn" class="btn ghost" type="button">Show the link instead</button>
+          </div>
+          <!-- For when the button opens nothing (a blocked pop-up, an in-app browser) or
+               the sign-in should happen in another browser or on another device. -->
+          <div id="googleLinkBox" class="link-box" hidden>
+            <p>Open this link in a new tab (or another browser), approve, then paste the code Google shows below.</p>
+            <textarea id="googleLink" class="link-text" rows="3" readonly spellcheck="false" aria-label="Google sign-in link"></textarea>
+            <div class="row">
+              <button id="copyGoogleLink" class="btn small primary" type="button">Copy link</button>
+              <a id="openGoogleLink" class="btn small ghost" target="_blank" rel="noopener">Open in a new tab</a>
+            </div>
+          </div>
           <form id="codeForm" class="code-form" hidden autocomplete="off">
             <label class="field"><span>Authorization code</span>
               <input id="codeInput" type="text" placeholder="4/0A…" spellcheck="false" autocapitalize="off" autocorrect="off" required>
             </label>
             <div class="row"><button class="btn primary" type="submit" id="codeBtn">Continue</button>
-              <button class="btn ghost" type="button" id="googleAgain">Open the Google page again</button></div>
+              <button class="btn ghost" type="button" id="googleAgain">Open the Google page again</button>
+              <button class="btn ghost" type="button" id="googleLinkAgain">Show the link</button></div>
           </form>
           <p class="msg" id="googleMsg" role="status"></p>
         </div>
@@ -129,6 +143,8 @@
 
   <section id="stage" class="stage" hidden>
     <canvas id="video" class="video" tabindex="0" aria-label="Roblox"></canvas>
+    <!-- The H.264 picture (site/h264player.js); the one above is JSMpeg's MPEG-1 picture. -->
+    <canvas id="video264" class="video" tabindex="0" aria-label="Roblox" hidden></canvas>
     <!-- What is typed into the focused Roblox text box: Cordial's X11 backend does not draw it. -->
     <div id="editorBox" class="editor-box" hidden></div>
     <button id="typeHere" class="type-here" type="button" hidden>⌨ Tap to type</button>
@@ -200,6 +216,11 @@
           <button type="button" data-quality="540" role="radio">Data saver · 540p</button>
           <button type="button" data-quality="720" role="radio">Sharp · 720p</button>
         </div>
+        <div class="seg wide" role="radiogroup" aria-label="Video" id="videoSeg">
+          <button type="button" data-video="auto" role="radio">Smooth · H.264, 60 fps</button>
+          <button type="button" data-video="mpeg1" role="radio">Compatible · MPEG-1, 30 fps</button>
+        </div>
+        <p class="muted">H.264 is encoded on the Colab GPU and decoded by this device's hardware video decoder. A browser or device without one gets the compatible stream by itself.</p>
         <label class="field inline"><span>Release the GPU after</span>
           <select id="limitSelect">
             <option value="60">1 hour</option><option value="120">2 hours</option>
@@ -234,6 +255,7 @@
   <script src="vendor/nacl-fast.min.js"></script>
   <script src="vendor/blake2b.js"></script>
   <script src="vendor/jsmpeg.min.js"></script>
+  <script src="h264player.js"></script>
   <script src="sealedbox.js"></script>
   <script src="app.js"></script>
 </body>
