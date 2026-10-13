@@ -120,6 +120,12 @@ input:focus, select:focus { outline: 2px solid color-mix(in srgb, var(--primary)
 .btn.play:hover:not(:disabled) { background: var(--go-hover); }
 .link { background: none; border: 0; padding: 0; color: #8fb4ff; cursor: pointer; text-decoration: underline; }
 .code-form { margin-top: 14px; }
+.link-box { margin-top: 14px; padding: 12px; border-radius: 12px; background: #0f131b; border: 1px solid var(--line); }
+.link-box p { margin: 0 0 10px; }
+.link-text {
+  display: block; width: 100%; margin: 0 0 10px; resize: vertical; font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; word-break: break-all;
+}
 
 .gpus { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .gpu {

@@ -5,10 +5,17 @@ Runs on the Colab VM as root, next to Xvfb and Cordial (which runs as the
 `player` user). Started by vm/setup.py and reached through a Cloudflare quick
 tunnel.
 
-Video and audio: ffmpeg grabs the Roblox window from the X display and the
-player's PulseAudio sink, encodes MPEG-1 video and MP2 audio in an MPEG-TS
-stream, and every connected /video websocket gets the bytes. The page decodes
-them with JSMpeg, which works the same in desktop and mobile browsers.
+Video and audio: vm/xcapture.py grabs the Roblox window from the X display
+and ffmpeg encodes it, and the sound from the player's PulseAudio sink, in
+separate streams:
+
+- /video264: H.264 at 60 frames a second, encoded on the GPU (NVENC), one
+  frame per websocket message (see H264Stream). Pages whose browser decodes
+  H.264 in hardware (WebCodecs) play this one.
+- /video: MPEG-1 in MPEG-TS at 30 frames a second, encoded on the CPU, for
+  JSMpeg, which plays it in any desktop or mobile browser. Pages fall back to
+  it when the browser has no hardware H.264 decoder or this VM has no NVENC.
+- /audio: MP2 in MPEG-TS, for JSMpeg, whichever picture the page plays.
 
 Input arrives on the /ctl websocket as small JSON messages:
 
@@ -19,11 +26,12 @@ Input arrives on the /ctl websocket as small JSON messages:
   touches directly. Keyboard keys are not forwarded in this mode; text from the
   phone's on-screen keyboard is typed into the focused text box instead.
 
-Both websockets require ?k=<session key>; only its SHA-256 is known here.
+Every websocket requires ?k=<session key>; only its SHA-256 is known here.
 """
 
 import argparse
 import asyncio
+import base64
 import collections
 import hashlib
 import hmac
@@ -31,6 +39,7 @@ import json
 import os
 import shlex
 import signal
+import struct
 import subprocess
 import sys
 import time
@@ -333,21 +342,52 @@ class Screen:
 
 
 class Stream:
-    """One ffmpeg, many viewers: the picture (`video`) or the sound (`audio`).
+    """One ffmpeg, many viewers: the MPEG-1 picture (`video`) or the sound (`audio`).
 
     Two streams rather than one with both: in one ffmpeg, the audio input
     started a second or two after the frames, and ffmpeg works on whichever
     input is furthest behind, so every frame waited in its queue for the sound
     to catch up -- 1.5 to 2.2 s from a key press to the picture, measured,
     against 0.2 s for the picture alone. Apart, neither waits for the other.
+
+    A lazy stream (the pictures) runs its ffmpeg only while someone watches it,
+    so the H.264 and MPEG-1 encoders are not both busy for one page.
     """
 
-    def __init__(self, cfg, kind):
+    LINGER = 20  # seconds a lazy stream keeps running after its last viewer leaves
+
+    def __init__(self, cfg, kind, lazy=False):
         self.cfg = cfg
         self.kind = kind
+        self.lazy = lazy
         self.viewers = set()
+        self.wanted = asyncio.Event()
         self.proc = None
         self.running = True
+        self.idle_stop = False
+        self.failures = 0
+        self.on_failing = None  # called with the number of quick failures in a row
+
+    def add(self, viewer):
+        self.viewers.add(viewer)
+        self.wanted.set()
+
+    def discard(self, viewer):
+        self.viewers.discard(viewer)
+
+    def capture(self, fps):
+        """The shell command that writes raw BGRx frames to ffmpeg's stdin."""
+        c = self.cfg
+        w, h = c["width"], c["height"]
+        if c.get("capture") == "x11grab":
+            return "", ["-f", "x11grab", "-draw_mouse", "0", "-framerate", str(fps),
+                        "-video_size", f"{w}x{h}", "-i", f"{c['display']}.0+0,0"]
+        # No MIT-SHM on this display (see vm/setup.py), and ffmpeg's x11grab
+        # gets no frames without it, so frames come from vm/xcapture.py.
+        prefix = shlex.join([sys.executable, c["xcapture"], c["display"], "0", "0", str(w), str(h), str(fps),
+                             c.get("fbfile") or ""]) + " | "
+        return prefix, ["-f", "rawvideo", "-pix_fmt", "bgr0", "-video_size", f"{w}x{h}",
+                        "-framerate", str(fps), "-i", "pipe:0"]
 
     def command(self):
         c = self.cfg
@@ -357,63 +397,233 @@ class Stream:
                    "-f", "pulse", "-fragment_size", "2048", "-i", c.get("audio_source") or "default",
                    "-f", "mpegts", "-c:a", "mp2", "-b:a", "128k", "-ar", "44100", "-ac", "2"]
         else:
-            w, h, fps, br = c["width"], c["height"], c["fps"], c["bitrate"]
-            if c.get("capture") == "x11grab":
-                prefix = ""
-                video_in = ["-f", "x11grab", "-draw_mouse", "0", "-framerate", str(fps),
-                            "-video_size", f"{w}x{h}", "-i", f"{c['display']}.0+0,0"]
-            else:
-                # No MIT-SHM on this display (see vm/setup.py), and ffmpeg's
-                # x11grab gets no frames without it, so frames come from
-                # vm/xcapture.py.
-                prefix = shlex.join([sys.executable, c["xcapture"], c["display"], "0", "0",
-                                     str(w), str(h), str(fps)]) + " | "
-                video_in = ["-f", "rawvideo", "-pix_fmt", "bgr0", "-video_size", f"{w}x{h}",
-                            "-framerate", str(fps), "-i", "pipe:0"]
+            fps, br = c["fps"], c["bitrate"]
+            prefix, video_in = self.capture(fps)
             cmd = (["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin"] + video_in +
                    ["-f", "mpegts", "-c:v", "mpeg1video", "-b:v", f"{br}k", "-maxrate", f"{br}k",
                     "-bufsize", f"{max(br // 2, 500)}k", "-g", str(fps), "-bf", "0"])
         cmd += ["-flush_packets", "1", "-muxdelay", "0.001", "pipe:1"]
+        return self.as_player(prefix + shlex.join(cmd))
+
+    def as_player(self, script):
         # As the player, for its PulseAudio; Xvfb lets local users in.
-        return ["runuser", "-u", c["user"], "--", c["as_player"], "sh", "-c", prefix + shlex.join(cmd)]
+        c = self.cfg
+        return ["runuser", "-u", c["user"], "--", c["as_player"], "sh", "-c", script]
+
+    async def read_output(self, out):
+        while True:
+            chunk = await out.read(32768)
+            if not chunk:
+                return
+            for q in list(self.viewers):
+                if q.qsize() < 64:
+                    q.put_nowait(chunk)
+                # else: a viewer that cannot keep up skips data and
+                # resynchronises on the next keyframe.
+
+    async def stop_when_unwatched(self):
+        alone_since = None
+        while True:
+            await asyncio.sleep(2)
+            if self.viewers:
+                alone_since = None
+            elif alone_since is None:
+                alone_since = time.monotonic()
+            elif time.monotonic() - alone_since > self.LINGER:
+                log(f"{self.kind}: nobody is watching, stopping its ffmpeg")
+                self.idle_stop = True
+                self.kill()
+                return
 
     async def run(self):
-        failures = 0
         while self.running:
+            while self.lazy and self.running and not self.viewers:
+                self.wanted.clear()
+                await self.wanted.wait()
+            if not self.running:
+                return
             started = time.monotonic()
+            self.idle_stop = False
             log(f"{self.kind}:", self.command()[-1])
             self.proc = await asyncio.create_subprocess_exec(
                 *self.command(), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 start_new_session=True)
             err_task = asyncio.create_task(self.proc.stderr.read())
-            while True:
-                chunk = await self.proc.stdout.read(32768)
-                if not chunk:
-                    break
-                for q in list(self.viewers):
-                    if q.qsize() < 64:
-                        q.put_nowait(chunk)
-                    # else: a viewer that cannot keep up skips data and
-                    # resynchronises on the next keyframe.
-            await self.proc.wait()
+            idle_task = asyncio.create_task(self.stop_when_unwatched()) if self.lazy else None
             try:
-                os.killpg(self.proc.pid, signal.SIGKILL)  # whatever of the pipeline is left
-            except ProcessLookupError:
-                pass
+                await self.read_output(self.proc.stdout)
+            finally:
+                if idle_task:
+                    idle_task.cancel()
+            self.kill()  # whatever of the pipeline is left
+            await self.proc.wait()
             err = (await err_task).decode(errors="replace").strip()
             if not self.running:
                 return
+            if self.idle_stop:
+                self.failures = 0
+                continue
             log(f"{self.kind} ffmpeg exited {self.proc.returncode}: {err[-500:]}")
-            failures = failures + 1 if time.monotonic() - started < 5 else 0
-            await asyncio.sleep(min(10, 0.5 * (failures + 1)))
+            self.failures = self.failures + 1 if time.monotonic() - started < 5 else 0
+            if self.on_failing:
+                self.on_failing(self.failures)
+            await asyncio.sleep(min(10, 0.5 * (self.failures + 1)))
 
-    def stop(self):
-        self.running = False
+    def kill(self):
         if self.proc and self.proc.returncode is None:
             try:
                 os.killpg(self.proc.pid, signal.SIGKILL)  # the capture and ffmpeg with it
             except ProcessLookupError:
                 pass
+
+    def stop(self):
+        self.running = False
+        self.wanted.set()
+        self.kill()
+
+
+class FrameViewer:
+    """One page watching the H.264 stream: whole frames, never a partial one.
+
+    A decoder can only start on a keyframe, so a viewer that joins, or falls so
+    far behind that its backlog is dropped, waits for the next one."""
+
+    MAX_LAG = 0.5  # seconds a frame may wait to be sent before the backlog is dropped
+
+    def __init__(self):
+        self.q = collections.deque()  # (time queued, str or bytes)
+        self.ready = asyncio.Event()
+        self.need_key = True
+
+    def put(self, msg, now=None):
+        self.q.append((now or time.monotonic(), msg))
+        self.ready.set()
+
+    def config(self, msg):
+        self.q.clear()
+        self.need_key = True
+        self.put(msg)
+
+    def frame(self, msg, key):
+        now = time.monotonic()
+        if self.q and now - self.q[0][0] > self.MAX_LAG:
+            # The link is slower than the stream: skip to the next keyframe
+            # rather than fall further and further behind.
+            self.q = collections.deque(m for m in self.q if isinstance(m[1], str))
+            self.need_key = True
+        if self.need_key and not key:
+            return
+        self.need_key = False
+        self.put(msg, now)
+
+    async def get(self):
+        while not self.q:
+            self.ready.clear()
+            await self.ready.wait()
+        return self.q.popleft()[1]
+
+
+class H264Stream(Stream):
+    """The picture as H.264 from the GPU's encoder (NVENC), for pages whose
+    browser decodes H.264 in hardware (WebCodecs).
+
+    The raw BGRx frames go to NVENC as they are, so the conversion to YUV
+    happens on the GPU too, and ffmpeg signals that conversion's matrix in the
+    stream. ffmpeg wraps the frames in FLV only because FLV gives each frame a
+    length and a keyframe flag: the frames are read out of it here and each is
+    sent to the page as one websocket message,
+
+        1 byte flags (1 = keyframe) | 4 bytes timestamp in ms | the frame (AVCC),
+
+    after a text message with the decoder's configuration (codec string and
+    avcC). A page that connects gets the frames since the last keyframe at once,
+    so its picture starts without waiting for the next one.
+    """
+
+    def __init__(self, cfg):
+        super().__init__(cfg, "h264", lazy=True)
+        self.config_msg = None
+        self.gop = []  # the frames since the last keyframe, keyframe first
+
+    def command(self):
+        c = self.cfg
+        fps, br = c["h264_fps"], c["h264_bitrate"]
+        prefix, video_in = self.capture(fps)
+        cmd = (["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin"] + video_in +
+               ["-c:v", "h264_nvenc", "-preset", "p1", "-tune", "ull", "-zerolatency", "1", "-delay", "0",
+                "-rc", "cbr", "-b:v", f"{br}k", "-maxrate", f"{br}k", "-bufsize", f"{max(br // 4, 500)}k",
+                "-profile:v", "high", "-g", str(fps), "-bf", "0", "-forced-idr", "1",
+                "-f", "flv", "-flvflags", "no_duration_filesize", "-flush_packets", "1", "pipe:1"])
+        return self.as_player(prefix + shlex.join(cmd))
+
+    async def read_output(self, out):
+        try:
+            head = await out.readexactly(9)
+            if head[:3] != b"FLV":
+                log("h264: not an FLV stream")
+                return
+            await out.readexactly(int.from_bytes(head[5:9], "big") - 9 + 4)
+            while True:
+                tag = await out.readexactly(11)
+                size = int.from_bytes(tag[1:4], "big")
+                ts = int.from_bytes(tag[4:7], "big") | tag[7] << 24
+                data = await out.readexactly(size)
+                # Video tags only, and only H.264 (codec 7) in them.
+                if tag[0] == 9 and size > 5 and data[0] & 0x0F == 7:
+                    if data[1] == 0:
+                        self.new_config(data[5:])
+                    elif data[1] == 1:
+                        self.new_frame(data[0] >> 4 == 1, ts, data[5:])
+                await out.readexactly(4)  # the previous tag's size, after the frame is out
+        except asyncio.IncompleteReadError:
+            return
+        finally:
+            # This encoder is gone; the next one starts with its own configuration.
+            self.config_msg = None
+            self.gop = []
+
+    def new_config(self, avcc):
+        if len(avcc) < 4:
+            return
+        self.config_msg = json.dumps({
+            "t": "config", "codec": "avc1." + avcc[1:4].hex(), "w": self.cfg["width"], "h": self.cfg["height"],
+            "fps": self.cfg["h264_fps"], "description": base64.b64encode(avcc).decode(),
+        })
+        self.gop = []
+        log(f"h264: {self.cfg['width']}x{self.cfg['height']} at {self.cfg['h264_fps']} fps, avc1.{avcc[1:4].hex()}")
+        for v in list(self.viewers):
+            v.config(self.config_msg)
+
+    def new_frame(self, key, ts, frame):
+        msg = struct.pack(">BI", 1 if key else 0, ts & 0xFFFFFFFF) + frame
+        if key:
+            self.gop = []
+        if key or self.gop:
+            self.gop.append(msg)
+        for v in list(self.viewers):
+            v.frame(msg, key)
+
+    def add(self, viewer):
+        if self.config_msg:
+            viewer.config(self.config_msg)
+            for i, msg in enumerate(self.gop):
+                viewer.frame(msg, i == 0)
+        super().add(viewer)
+
+
+def nvenc_works(cfg):
+    """Whether this VM's ffmpeg can encode H.264 on the GPU, as the player."""
+    probe = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-f", "lavfi",
+             "-i", "color=black:s=256x144:r=30", "-frames:v", "3", "-c:v", "h264_nvenc", "-f", "null", "-"]
+    try:
+        r = subprocess.run(["runuser", "-u", cfg["user"], "--", cfg["as_player"], *probe],
+                           capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log("nvenc: probe failed:", e)
+        return False
+    if r.returncode != 0:
+        log("nvenc: not available, pages get MPEG-1:", (r.stdout + r.stderr).strip()[-300:])
+    return r.returncode == 0
 
 
 class Streamer:
@@ -422,13 +632,22 @@ class Streamer:
         self.mode = cfg["mode"]
         self.key_hash = cfg["key_hash"]
         self.screen = Screen(cfg["display"], cfg["width"], cfg["height"])
-        cfg.setdefault("capture", "x11grab" if "MIT-SHM" in self.screen.d.list_extensions() else "xgetimage")
+        if "MIT-SHM" in self.screen.d.list_extensions():
+            cfg.setdefault("capture", "x11grab")
+        elif cfg.get("fbfile") and os.access(cfg["fbfile"], os.R_OK):
+            cfg.setdefault("capture", "xvfb-framebuffer")
+        else:
+            cfg.setdefault("capture", "xgetimage")
         cfg.setdefault("xcapture", os.path.join(os.path.dirname(os.path.abspath(__file__)), "xcapture.py"))
         log("capture:", cfg["capture"])
         self.devctl = Devctl(cfg["devctl"])
         self.devctl.on_probe = lambda: asyncio.get_running_loop().create_task(self.broadcast(self.state()))
-        self.video = Stream(cfg, "video")
+        self.video = Stream(cfg, "video", lazy=True)
         self.audio = Stream(cfg, "audio")
+        self.h264 = H264Stream(cfg)
+        self.h264_ok = bool(cfg.get("h264_fps")) and nvenc_works(cfg)
+        self.h264.on_failing = self.h264_failing
+        log("h264:", f"NVENC at {cfg['h264_fps']} fps, {cfg['h264_bitrate']} kb/s" if self.h264_ok else "off")
         self.ctl_clients = set()
         self.last_client = time.time()
         self.stopped = False
@@ -448,7 +667,7 @@ class Streamer:
             "t": "state", "mode": self.mode, "w": self.cfg["width"], "h": self.cfg["height"],
             "game": self.screen.roblox is not None, "multiTouch": self.devctl.multi_touch,
             "locked": self.screen.locked, "stopped": self.stopped, "restarting": self.restarting,
-            "gpu": self.cfg.get("gpu"),
+            "gpu": self.cfg.get("gpu"), "h264": self.h264_ok,
         }
 
     async def broadcast(self, msg):
@@ -462,7 +681,7 @@ class Streamer:
     # ------------------------------------------------------------- handlers
     async def health(self, request):
         return web.json_response({"ok": True, "game": self.screen.roblox is not None,
-                                  "stopped": self.stopped},
+                                  "stopped": self.stopped, "h264": self.h264_ok},
                                  headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-store"})
 
     async def video_ws(self, request):
@@ -477,7 +696,7 @@ class Streamer:
         ws = web.WebSocketResponse(max_msg_size=1 << 16, heartbeat=20)
         await ws.prepare(request)
         q = asyncio.Queue()
-        stream.viewers.add(q)
+        stream.add(q)
         log(f"{stream.kind} viewer connected")
 
         async def pump():
@@ -494,9 +713,47 @@ class Streamer:
                 pass
         finally:
             sender.cancel()
-            stream.viewers.discard(q)
+            stream.discard(q)
             log(f"{stream.kind} viewer left")
         return ws
+
+    async def h264_ws(self, request):
+        if not self.authorised(request):
+            return web.Response(status=403, text="bad key")
+        if not self.h264_ok:
+            return web.Response(status=404, text="no H.264 on this VM")
+        ws = web.WebSocketResponse(max_msg_size=1 << 16, heartbeat=20, compress=False)
+        await ws.prepare(request)
+        viewer = FrameViewer()
+        self.h264.add(viewer)
+        log("h264 viewer connected")
+
+        async def pump():
+            while True:
+                msg = await viewer.get()
+                if isinstance(msg, str):
+                    await ws.send_str(msg)
+                else:
+                    await ws.send_bytes(msg)
+
+        sender = asyncio.create_task(pump())
+        try:
+            async for _ in ws:
+                pass
+        finally:
+            sender.cancel()
+            self.h264.discard(viewer)
+            log("h264 viewer left")
+        return ws
+
+    def h264_failing(self, failures):
+        # NVENC that worked at the start and keeps failing now: send every page
+        # to the MPEG-1 stream rather than leave it without a picture.
+        if failures >= 3 and self.h264_ok:
+            log("h264: the encoder keeps failing; pages switch to MPEG-1")
+            self.h264_ok = False
+            self.h264.stop()
+            asyncio.get_running_loop().create_task(self.broadcast(self.state()))
 
     async def ctl_ws(self, request):
         if not self.authorised(request):
@@ -698,6 +955,7 @@ class Streamer:
         self.stopped = True
         self.video.stop()
         self.audio.stop()
+        self.h264.stop()
         subprocess.run(["pkill", "-KILL", "-u", self.cfg["user"]])
         self.write_state()
         await self.broadcast({"t": "stopped", "why": why})
@@ -770,6 +1028,7 @@ def main():
     app = web.Application()
     app.router.add_get("/health", st.health)
     app.router.add_get("/video", st.video_ws)
+    app.router.add_get("/video264", st.h264_ws)
     app.router.add_get("/audio", st.audio_ws)
     app.router.add_get("/ctl", st.ctl_ws)
     app.router.add_get("/", lambda r: web.Response(text="RobloxCloud streamer\n"))
@@ -778,6 +1037,8 @@ def main():
         loop = asyncio.get_running_loop()
         app["tasks"] = [loop.create_task(st.video.run()), loop.create_task(st.audio.run()),
                         loop.create_task(st.housekeeping())]
+        if st.h264_ok:
+            app["tasks"].append(loop.create_task(st.h264.run()))
         def leave():  # SystemExit from a loop callback ends run_app, as aiohttp's own handler does
             raise web.GracefulExit()
 
@@ -785,6 +1046,7 @@ def main():
             # Leave the game alone: a restarted streamer picks it up again.
             st.video.stop()
             st.audio.stop()
+            st.h264.stop()
             loop.call_soon(leave)
 
         loop.add_signal_handler(signal.SIGTERM, lambda: loop.create_task(on_sigterm()))
@@ -796,6 +1058,7 @@ def main():
     finally:
         st.video.stop()
         st.audio.stop()
+        st.h264.stop()
 
 
 if __name__ == "__main__":

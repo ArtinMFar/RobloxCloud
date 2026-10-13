@@ -1,7 +1,8 @@
 /* RobloxCloud's page. Static: everything it does goes through the GitHub API (to
  * start and stop .github/workflows/session.yml and to keep secrets) and, once a
- * session is up, through two websockets to the streamer on the Colab VM
- * (vm/streamer.py): /video for the picture and sound, /ctl for input. */
+ * session is up, through websockets to the streamer on the Colab VM
+ * (vm/streamer.py): /video264 (H.264, hardware decoded, see h264player.js) or
+ * /video (MPEG-1 for JSMpeg) for the picture, /audio for the sound, /ctl for input. */
 "use strict";
 (() => {
   // The colab CLI's own sign-in (colab_cli/auth.py): its OAuth client, scopes and
@@ -68,7 +69,7 @@
   }
 
   const settings = Object.assign(
-    { mode: isTouchFirst ? "mobile" : "pc", quality: "720", limit: "120", repo: guessRepo(), gpu: "L4" },
+    { mode: isTouchFirst ? "mobile" : "pc", quality: "720", video: "auto", limit: "120", repo: guessRepo(), gpu: "L4" },
     store.get("rc.settings", {})
   );
   const saveSettings = () => store.set("rc.settings", settings);
@@ -237,6 +238,7 @@
       ? `Signed in${google.email ? " as " + google.email : ""}.`
       : "The Colab CLI's sign-in. Colab bills GPU time to this account.";
     $("#codeForm").hidden = !(pending || login);
+    if (!pending) $("#googleLinkBox").hidden = true;
     $("#accountChip").hidden = !google;
     $("#accountChip").textContent = google ? google.email || "Signed in" : "";
 
@@ -278,11 +280,14 @@
   }
 
   // ------------------------------------------------------------ step 1: Google
-  async function openGoogle() {
+  /** The Google sign-in link. A recent pending one is used again: a code from a
+   * tab that is already open only works with the verifier its link was made with. */
+  async function googleUrl() {
+    const pk = store.get("rc.pkce");
+    if (pk && pk.url && Date.now() - pk.at < 20 * 60000) return pk.url;
     const verifier = b64url(random(48));
     const challenge = b64url(await sha256(verifier));
     const state = b64url(random(16));
-    store.set("rc.pkce", { verifier, state, at: Date.now() });
     const url =
       "https://accounts.google.com/o/oauth2/auth?" +
       new URLSearchParams({
@@ -297,14 +302,53 @@
         token_usage: "remote",
         access_type: "offline",
       });
+    store.set("rc.pkce", { verifier, state, at: Date.now(), url });
+    return url;
+  }
+
+  async function openGoogle() {
+    const url = await googleUrl();
     window.open(url, "_blank", "noopener");
     store.del("rc.login");
     renderHome();
-    setMsg($("#googleMsg"), "Google's page opened in a new tab. Copy the code it shows, then paste it above.");
+    setMsg($("#googleMsg"), "Google's page opened in a new tab. Copy the code it shows, then paste it above. No new tab? Press Show the link.");
     $("#codeInput").focus();
   }
   $("#googleBtn").addEventListener("click", openGoogle);
   $("#googleAgain").addEventListener("click", openGoogle);
+
+  // The same link, shown, for when the button opens nothing (a blocked pop-up,
+  // an in-app browser) or the sign-in should happen in another browser.
+  async function showGoogleLink() {
+    const url = await googleUrl();
+    store.del("rc.login");
+    renderHome();
+    $("#googleLink").value = url;
+    $("#openGoogleLink").href = url;
+    $("#googleLinkBox").hidden = false;
+    setMsg($("#googleMsg"), "");
+    $("#googleLink").focus();
+    $("#googleLink").select();
+  }
+  $("#googleLinkBtn").addEventListener("click", showGoogleLink);
+  $("#googleLinkAgain").addEventListener("click", showGoogleLink);
+  $("#googleLink").addEventListener("focus", (e) => e.target.select());
+  $("#copyGoogleLink").addEventListener("click", async () => {
+    const t = $("#googleLink");
+    let ok = false;
+    try {
+      await navigator.clipboard.writeText(t.value);
+      ok = true;
+    } catch {}
+    if (!ok) {
+      t.focus();
+      t.select();
+      try {
+        ok = document.execCommand("copy");
+      } catch {}
+    }
+    toast(ok ? "Link copied. Paste it into a new tab's address bar." : "Select the link and copy it.", ok ? "" : "warn");
+  });
 
   function cleanCode(raw) {
     raw = raw.trim();
@@ -625,7 +669,9 @@
   }
 
   // ------------------------------------------------------------------- stage
-  let player = null; // the picture
+  let player = null; // the picture, when it is MPEG-1 (JSMpeg)
+  let h264 = null; // the picture, when it is H.264 (h264player.js)
+  let videoKind = null; // "h264" or "mpeg1" once picked, "pending" while picking
   let sound = null; // the sound, a separate stream
   let ctl = null;
   let ctlBackoff = 1;
@@ -634,19 +680,35 @@
   let wakeLock = null;
   let pingTimer;
   let lastRtt = null;
-  const canvas = $("#video");
+  let stageUrl = null; // {base, k} of the open stage's streamer
+  let stageGen = 0; // which opening of the stage an async step belongs to
+  let pickTimer;
+  let frames = 0; // pictures drawn, for the frame rate
+  let fpsTimer;
+  let fps = null;
+  // JSMpeg draws with WebGL and the H.264 player with a 2D context, and a
+  // canvas keeps the first kind it was given, so each has its own. `canvas` is
+  // the one showing; input listens on both.
+  const canvases = [$("#video"), $("#video264")];
+  let canvas = canvases[0];
+  const onCanvas = (type, fn, opts) => canvases.forEach((c) => c.addEventListener(type, fn, opts));
+  // Asked once: whether this device has a hardware H.264 decoder.
+  let h264Support = null;
+  const h264Supported = () => (h264Support = h264Support || window.H264Player.supported());
 
   function openStage() {
     show("stage");
     clearInterval(launchTick);
     firstFrame = false;
+    stageGen++;
     overlay("Connecting to the stream…", true);
     renderModeButtons();
     $("#kbBtn").hidden = !(hasTouch || settings.mode === "mobile");
     fit();
     const base = session.url.replace(/^http/, "ws");
     const k = encodeURIComponent(session.key);
-    // Picture and sound arrive as two streams (see vm/streamer.py's Stream):
+    stageUrl = { base, k };
+    // Picture and sound arrive as separate streams (see vm/streamer.py's Stream):
     // muxed together, the picture waited seconds for the sound.
     sound = new JSMpeg.Player(`${base}/audio?k=${k}`, {
       video: false,
@@ -656,30 +718,99 @@
       maxAudioLag: 0.15,
       reconnectInterval: 2,
     });
-    player = new JSMpeg.Player(`${base}/video?k=${k}`, {
+    // The picture waits for the streamer's first state, which says whether it
+    // has H.264; a streamer that says nothing gets MPEG-1.
+    videoKind = null;
+    clearTimeout(pickTimer);
+    pickTimer = setTimeout(() => pickVideo(false), 5000);
+    openCtl(base, k);
+    clearInterval(pingTimer);
+    pingTimer = setInterval(() => send({ t: "ping", ts: performance.now() }), 2000);
+    frames = 0;
+    fps = null;
+    let last = { frames: 0, at: performance.now() };
+    clearInterval(fpsTimer);
+    fpsTimer = setInterval(() => {
+      const now = performance.now();
+      fps = Math.round(((frames - last.frames) * 1000) / (now - last.at));
+      last = { frames, at: now };
+      updateStat();
+    }, 1000);
+    fadeHudSoon();
+  }
+
+  /** H.264 when the streamer has it, this device decodes it in hardware and
+   * Settings allow it; otherwise the MPEG-1 stream, as before. */
+  async function pickVideo(serverH264) {
+    if (videoKind || !stageUrl) return;
+    videoKind = "pending";
+    clearTimeout(pickTimer);
+    const gen = stageGen;
+    const ok = !!serverH264 && settings.video !== "mpeg1" && !!window.H264Player && (await h264Supported());
+    if (gen !== stageGen || videoKind !== "pending") return;
+    if (ok) startH264();
+    else startMpeg1();
+  }
+
+  function startH264() {
+    videoKind = "h264";
+    useCanvas(canvases[1]);
+    h264 = new window.H264Player(`${stageUrl.base}/video264?k=${stageUrl.k}`, canvas, {
+      onFrame: gotFrame,
+      onFail: (why) => {
+        console.warn("H.264 stream:", why);
+        h264 = null;
+        if (!stageUrl) return;
+        startMpeg1();
+        toast("This device could not decode the H.264 stream, so the compatible MPEG-1 stream is playing.", "warn", 8000);
+      },
+    });
+  }
+
+  function startMpeg1() {
+    if (h264) h264.destroy();
+    h264 = null;
+    try {
+      if (player) player.destroy();
+    } catch {}
+    videoKind = "mpeg1";
+    useCanvas(canvases[0]);
+    player = new JSMpeg.Player(`${stageUrl.base}/video?k=${stageUrl.k}`, {
       canvas,
       audio: false,
       video: true,
       pauseWhenHidden: false,
       videoBufferSize: 4 * 1024 * 1024,
       reconnectInterval: 2,
-      onVideoDecode: () => {
-        if (!firstFrame) {
-          firstFrame = true;
-          fit();
-          overlay(null);
-          readyToPlay();
-        }
-      },
+      onVideoDecode: gotFrame,
     });
-    openCtl(base, k);
-    clearInterval(pingTimer);
-    pingTimer = setInterval(() => send({ t: "ping", ts: performance.now() }), 2000);
-    fadeHudSoon();
+  }
+
+  function gotFrame() {
+    frames++;
+    if (!firstFrame) {
+      firstFrame = true;
+      fit();
+      overlay(null);
+      readyToPlay();
+    }
+  }
+
+  function useCanvas(el) {
+    if (document.pointerLockElement && document.pointerLockElement !== el) document.exitPointerLock();
+    canvas = el;
+    canvases.forEach((c) => (c.hidden = c !== el));
+    fit();
   }
 
   function closeStage() {
     clearInterval(pingTimer);
+    clearInterval(fpsTimer);
+    clearTimeout(pickTimer);
+    stageUrl = null;
+    videoKind = null;
+    if (h264) h264.destroy();
+    h264 = null;
     for (const p of [player, sound]) {
       try {
         if (p) p.destroy();
@@ -776,8 +907,10 @@
     const sw = stage.clientWidth || innerWidth;
     const sh = stage.clientHeight || innerHeight;
     const s = Math.min(sw / w, sh / h);
-    canvas.style.width = `${Math.floor(w * s)}px`;
-    canvas.style.height = `${Math.floor(h * s)}px`;
+    for (const c of canvases) {
+      c.style.width = `${Math.floor(w * s)}px`;
+      c.style.height = `${Math.floor(h * s)}px`;
+    }
   }
   addEventListener("resize", fit);
 
@@ -820,6 +953,11 @@
   function onServerState(m) {
     const was = serverState;
     serverState = m;
+    if (!videoKind) pickVideo(m.h264);
+    else if (videoKind === "h264" && m.h264 === false && stageUrl) {
+      startMpeg1();
+      toast("The VM's H.264 encoder stopped, so the MPEG-1 stream is playing.", "warn", 8000);
+    }
     if (m.w !== was.w || m.h !== was.h) fit();
     if (firstFrame && $("#overlayText").textContent === "Reconnecting…") overlay(null);
     if (m.restarting) overlay("Restarting Roblox…", true);
@@ -840,10 +978,14 @@
     const parts = [];
     if (session && session.gpu) parts.push(session.gpu);
     if (lastRtt !== null) parts.push(`${lastRtt} ms`);
+    if (firstFrame && fps !== null) parts.push(`${fps} fps`);
     if (settings.mode === "mobile" && serverState.multiTouch === false) parts.push("1 finger");
     $("#hudStat").textContent = parts.join(" · ");
+    const codec =
+      videoKind === "h264" ? " · H.264, decoded in hardware" : videoKind === "mpeg1" ? " · MPEG-1 (compatible stream)" : "";
     $("#menuInfo").textContent =
       `Stream ${dims().w}×${dims().h}` +
+      codec +
       (settings.mode === "mobile"
         ? serverState.multiTouch === false
           ? " · This VM's Cordial takes one finger at a time."
@@ -954,7 +1096,7 @@
     }, 4000);
   }
 
-  canvas.addEventListener("pointerdown", (e) => {
+  onCanvas("pointerdown", (e) => {
     e.preventDefault();
     unlockAudio();
     canvas.focus({ preventScroll: true });
@@ -990,7 +1132,7 @@
     send({ t: "mb", b, d: 1, x: r4(p.x), y: r4(p.y) });
   });
 
-  canvas.addEventListener("pointermove", (e) => {
+  onCanvas("pointermove", (e) => {
     if (settings.mode === "mobile") {
       const p = pointers.get(e.pointerId);
       if (!p) return;
@@ -1032,10 +1174,10 @@
       send({ t: "mb", b, d: 0, x: r4(p.x), y: r4(p.y) });
     }
   }
-  canvas.addEventListener("pointerup", pointerEnd);
-  canvas.addEventListener("pointercancel", pointerEnd);
-  canvas.addEventListener("contextmenu", (e) => e.preventDefault());
-  canvas.addEventListener(
+  onCanvas("pointerup", pointerEnd);
+  onCanvas("pointercancel", pointerEnd);
+  onCanvas("contextmenu", (e) => e.preventDefault());
+  onCanvas(
     "wheel",
     (e) => {
       e.preventDefault();
@@ -1197,6 +1339,7 @@
   function renderSettings() {
     renderModeButtons();
     $$("[data-quality]").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.quality === settings.quality)));
+    $$("[data-video]").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.video === settings.video)));
     $("#limitSelect").value = String(settings.limit);
     $("#repoInput").value = settings.repo;
     $("#tokenInput").value = "";
@@ -1217,6 +1360,13 @@
       saveSettings();
       renderSettings();
       renderHome();
+    })
+  );
+  $$("[data-video]").forEach((b) =>
+    b.addEventListener("click", () => {
+      settings.video = b.dataset.video;
+      saveSettings();
+      renderSettings();
     })
   );
   $("#limitSelect").addEventListener("change", (e) => {

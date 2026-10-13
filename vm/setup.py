@@ -23,6 +23,7 @@ import urllib.request
 D = "/content/rc"
 TMP = "/tmp/rc"
 DISPLAY = ":99"
+FBDIR = "/dev/shm/rc-fb"  # Xvfb keeps its screen here, where vm/xcapture.py reads it
 CORDIAL_DEB = "https://github.com/luohoa97/cordial/releases/download/v0.27.0/cordial_0.27.0-1_amd64.deb"
 CLOUDFLARED = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
 cfg = dict(RC)  # noqa: F821 -- defined by scripts/session.py
@@ -128,9 +129,11 @@ sh("[ -e /dev/nvidia-modeset ] || mknod -m 666 /dev/nvidia-modeset c 195 254")
 status("display", "Starting a virtual display")
 if sh("pgrep -x Xvfb")[0] != 0:
     # No MIT-SHM: a non-root client cannot attach to root's X shared memory here,
-    # and its windows stay black.
+    # and its windows stay black. -fbdir puts the screen in a memory-mapped file
+    # instead, which the stream reads without asking the X server for it.
+    os.makedirs(FBDIR, exist_ok=True)
     bg(f"Xvfb {DISPLAY} -screen 0 {max(1600, W)}x{max(900, H)}x24 +extension GLX +render "
-       "-extension MIT-SHM -noreset", "/tmp/rc/xvfb.log")
+       f"-extension MIT-SHM -noreset -fbdir {FBDIR}", "/tmp/rc/xvfb.log")
     for _ in range(30):
         if sh("xdpyinfo >/dev/null 2>&1")[0] == 0:
             break
@@ -191,6 +194,9 @@ port = 8765
 json.dump({
     "port": port, "key_hash": cfg["key_hash"], "mode": cfg["mode"], "width": W, "height": H,
     "fps": int(cfg.get("fps", 30)), "bitrate": int(cfg.get("bitrate", 3500)), "display": DISPLAY,
+    "h264_fps": int(cfg.get("h264_fps", 60)),
+    "h264_bitrate": int(cfg.get("h264_bitrate") or (6000 if H >= 720 else 3500)),
+    "fbfile": f"{FBDIR}/Xvfb_screen0",
     "devctl": f"/run/user/{uid}/devctl.sock", "state_file": "/tmp/rc/state.json", "user": "player",
     "as_player": f"{D}/as_player.sh", "launcher": f"{D}/launch_roblox.py",
     "audio_source": audio_source, "gpu": gpu_name,
